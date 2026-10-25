@@ -1,0 +1,103 @@
+# Hand-off: finish setting up the PS5 Pro Restock Buyer on my Mac
+
+Paste everything below into a new Claude conversation in the Claude desktop app on the Mac (Computer use turned on, and the Claude in Chrome extension if available).
+
+---
+
+I'm about to leave for the day. Help me get my PS5 Pro auto-buyer running correctly on this Mac so it can work unattended all day. The plan: restock trackers (a Discord restock channel) spot the stock, and my Chrome extension does the automated checkout. Please work through the tasks below in order, keep instructions to me short and specific, and tell me plainly what you verified and what you couldn't.
+
+## What already exists
+
+- **A Chrome extension I own and built**, "PS5 Pro Restock Buyer". Code: https://github.com/ImOrical/General, branch `claude/ps5-pro-purchase-plan-8n2ika`. The README on that branch has full instructions.
+- It's installed in Google Chrome as an unpacked extension from `~/Documents/ps5-buyer/General-claude-ps5-pro-purchase-plan-8n2ika/extension`. The ZIP was downloaded with: `cd ~/Documents && curl -sL -o ps5-buyer.zip https://github.com/ImOrical/General/archive/refs/heads/claude/ps5-pro-purchase-plan-8n2ika.zip && rm -rf ps5-buyer && unzip -q ps5-buyer.zip -d ps5-buyer && rm ps5-buyer.zip`
+- Clicking its blue ▶ toolbar icon opens the **dashboard**. It has these sections:
+  - **Stores** table: On, Product link, Status, Price, Seller, Checked, Speed, Signed in, Practice.
+  - **Logins & card (encrypted)**: the vault.
+  - **Buying rules**: price cap $899.99, "How it finds stock", speed settings.
+  - **Alerts**: ntfy topic, Pushover, Discord channels, outside-alert topic, "Needs you" link.
+  - **Activity** log and **Advanced: store overrides**.
+- **Top bar:** mode **Monitor / Dry run / Armed**, a speed pill, a Go hot / Cool down button, and **Start/Stop**.
+- **What it does when Started:**
+  - Opens a separate "watcher" Chrome window with one tab per store listing, plus pinned Discord channel tabs.
+  - In the default **"Restock alerts"** mode, it reads new posts in the Discord channels. When a post about a PS5 Pro names a store or links a listing, it loads that store's page immediately and keeps reloading it every few seconds for about 2 minutes.
+  - Between alerts it reloads each store only every 5 minutes, as a safety net, so stores rarely show CAPTCHAs.
+- **When a page shows a buyable PS5 Pro**, it checks it's new, sold by the store itself, and at or under $899.99. Then it adds to cart, goes straight to checkout, and checks the subtotal again. In Armed mode it then presses Place Order itself.
+- **What it does on its own vs. hands to me:**
+  - It signs in from the vault and fills the CVV automatically.
+  - For CAPTCHAs and one-time codes, it stops and alerts my phone (ntfy) every minute.
+  - Only one order is ever placed. After that it disarms.
+- **Stores:** PlayStation Direct, Best Buy, Target, Walmart, Amazon, GameStop.
+- **Amazon links to watch:** `https://www.amazon.com/dp/B0FTMY4YZ2 https://www.amazon.com/dp/B0DGY63Z2H` (space-separated in the Amazon box).
+
+## My setup so far
+
+- Signed in, with address and card saved and carts emptied, at: Best Buy, Target, Walmart, Amazon, GameStop.
+- **PlayStation Direct:** I use a new PlayStation account just for buying, because I can't get into my main one. I saved a card at playstation.com account management.
+- **Best Buy** kept signing me out and its 2-step code blocked the automatic sign-in. If it still won't stay signed in, untick Best Buy rather than fight it, and tell me.
+- **ntfy** is installed on my iPhone and subscribed to the dashboard's topic.
+- **The vault** holds my store logins and CVV, locked with a passphrase only I know.
+
+## Rules for you
+
+1. **Never ask for, look at, or type my passwords, CVV or vault passphrase.** When one is needed, tell me exactly where to type it and wait.
+2. **Don't press Place Order or complete any purchase yourself.** The extension does that. If you run a Practice checkout, it stops before Place Order on its own.
+3. **Don't build or use proxies, extra accounts, or CAPTCHA solvers,** and don't turn off any store's 2-step verification.
+4. **Clicking in Chrome:** use Claude in Chrome for web pages (computer use can see Chrome but can't click in it). Some Chrome pages like `chrome://extensions` may need me to click; tell me exactly what to click.
+5. **Code changes:** if you change code, edit the repo checkout (clone it if needed) and push to the same branch `claude/ps5-pro-purchase-plan-8n2ika`. Then re-download into `~/Documents/ps5-buyer` and have me click ↻ on the extension at `chrome://extensions`.
+
+## Tasks, in order (I'm short on time, so do 1–7 first)
+
+1. **Update the extension to the latest code.** Run the download command above in Terminal. Then have me open `chrome://extensions`, make sure **Developer mode** is on, and click ↻ on PS5 Pro Restock Buyer. The folder path stays the same, so settings and the vault survive. Reloading locks the vault.
+2. **Open the dashboard** (blue ▶ icon). Have me unlock the vault: I type the passphrase and click **Unlock**. Confirm the badge says **Unlocked**.
+3. **Discord.** Have me join TrackaLacker's free Discord (invite on https://www.trackalacker.com/articles/news/find-ps5-pro-in-stock) or StockMaid's (#ps5-pro channel). In Chrome, go to https://discord.com/app and open the PS5 / console restock channel. Copy the address-bar link (`https://discord.com/channels/…/…`) into the dashboard's **Alerts → Discord restock channels** box. Make sure **"Also open product links from posts"** is ticked, then click **Save settings**.
+4. **Check the settings.**
+   - "How it finds stock" = **Restock alerts**.
+   - Max price **899.99**, ignore prices under **600**.
+   - Safety-net page load **300** seconds.
+   - Stores I don't use are unticked.
+   - The Amazon links above are in the Amazon box.
+   - Click **Save settings**.
+5. **Phone alerts.** Click **Send test alert** and have me confirm my iPhone buzzed. It also plays a siren on the Mac for about 15 seconds. If it didn't buzz, the topic in the ntfy app must match the dashboard exactly.
+6. **Arm and start.** Click **Armed** (confirm the dialog), then **Start**. A watcher window opens with store tabs and a pinned Discord tab. If Discord asks me to sign in there, I'll do it. Then check the dashboard:
+   - Discord status says **"Watching 1 channel"**.
+   - Each store's Speed column says **Safety 300s**.
+   - The speed pill says **Waiting for alerts**.
+   - The mode is **Armed**.
+   - Nothing in the Status column says "Bot check: solve it". If one does, have me solve it in that watcher tab.
+7. **Keep the Mac awake all day.**
+   - Run `caffeinate -dimsu -t 43200 &` in Terminal (12 hours), and leave Terminal open.
+   - Have me confirm the Mac is plugged in.
+   - **System Settings → Battery → Options →** "Prevent automatic sleeping on power adapter when the display is off" on (on a desktop Mac, **System Settings → Energy**).
+   - Turn Chrome's Energy Saver off at `chrome://settings/performance`.
+   - Tell me not to close the watcher window or quit Chrome.
+8. **Optional, recommended: remote access for CAPTCHAs while I'm out.**
+   - Set up Chrome Remote Desktop on the Mac (https://remotedesktop.google.com/access) and have me install its iPhone app.
+   - Put `https://remotedesktop.google.com/access` in the dashboard's **"Needs you" alerts open** box and save.
+9. **Optional, if time allows: Practice.** For each enabled store:
+   - Have me pick a cheap in-stock item sold by the store (under $10, not a gift card), then click **Practice** on that store's row and paste the link.
+   - It should end with a "Practice passed at …" notification.
+   - Afterwards, empty that store's cart. A leftover item would make it refuse a real purchase.
+   - If a store fails, read the **Activity** log lines for it. Inspect that store's real page with Claude in Chrome to find the right buttons and selectors. Fix it with an override in **Advanced: store overrides**, or in `extension/lib/config.js` and push. Then rerun Practice.
+10. **Before I leave,** give me a 5-line summary:
+    - what's running
+    - which stores are active
+    - Discord status
+    - what I'll get alerts for
+    - what to do if my phone says "needs you" (open Chrome Remote Desktop, solve the CAPTCHA or enter the code in the tab it opened; checkout continues by itself)
+
+## Useful facts if something goes wrong
+
+- **"Bot check: solve it"** means a real CAPTCHA is on that store's page in the watcher window: I solve it once. A **Speed** column showing "Reload 20s" just means the store turned away background checks; it's still watched.
+- **Signed in column:** "No: sign in" means sign in once in the tab it leaves open, then click **Check sign-ins now**.
+- **Activity log** (bottom of the dashboard) explains everything the extension did.
+- **Code layout**, all under `extension/`:
+  - `lib/config.js`: store definitions, selectors, URLs, defaults
+  - `lib/detect.js`: reads product pages
+  - `lib/flow.js`: checkout helpers and the final guard
+  - `lib/fastlane.js`: alert parsing, stock JSON, hot hours
+  - `lib/vault.js`: encrypted vault
+  - `content.js`: runs on store and Discord pages
+  - `background.js`: coordinator, alerts, the one-order lock
+  - `dashboard.*`: the dashboard page
+- **Tests:** `npm install && npm test` for unit tests. The `npm run test:e2e` tests use fake stores and need port 443, so they may not run on the Mac; don't worry if they don't.
+- **Restock outlook:** list price is $899.99. GTA 6 launches Nov 19 and Black Friday is Nov 27; if Sony cuts the price, lower the max price.
