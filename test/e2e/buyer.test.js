@@ -421,6 +421,25 @@ test('two listings at one store: watches both and buys the one that restocks', a
   }
 });
 
+test('store refuses quick checks: not shown as blocked, no phone alert, still catches the restock by reloading', async () => {
+  Object.assign(mock.state.stores.bestbuy, { refuseQuick: true });
+  const b = await launch(settingsFor('monitor', ['bestbuy'], { reloadIntervalSec: 120, reloadOnlySec: 4 }));
+  try {
+    await waitFor(async () => {
+      const s = await b.state();
+      return s.rt.speed.bestbuy && s.rt.speed.bestbuy.quickOff;
+    }, { timeout: 30000, what: 'switching to reloads only' });
+    const st = await status(b, 'bestbuy');
+    assert.equal(st.state, 'out_of_stock', 'still shows the real stock state, not "blocked"');
+    assert.ok(!mock.state.ntfy.some((n) => /block|bot check/i.test(n.title + n.body)), 'no phone alert for refused quick checks');
+    mock.state.stores.bestbuy.inStock = true;
+    await waitFor(() => ntfyTitles().some((t) => /IN STOCK at Best Buy/.test(t)), { timeout: 20000, what: 'in-stock push via reloads' });
+    assert.ok(mock.state.stores.bestbuy.refused >= 3);
+  } finally {
+    await b.close();
+  }
+});
+
 test('checkout shortcut: skips the cart, and falls back when a store insists on it', async () => {
   mock.state.stores.bestbuy.inStock = true;
   mock.state.stores.walmart.inStock = true;

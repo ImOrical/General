@@ -247,7 +247,9 @@
     // this ntfy topic make the extension check that store immediately.
     trigger: { ntfyTopic: '', anyProduct: false },
     jitterPct: 30,
-    cacheBust: true,
+    // When a store refuses the quick checks, that listing is watched by full
+    // page reloads at this pace instead (before hot/warm speed-ups).
+    reloadOnlySec: 20,
     // Re-open the watcher automatically when Chrome starts.
     autoStart: true,
     // How often to check every store still has you signed in (0 = never).

@@ -63,7 +63,7 @@ Four layers, fastest first.
 3. **Page quick checks** when no stock request was found: the page HTML every **4 seconds**, read without rendering. A full reload happens every **40 seconds**, and the open page reacts within half a second if the store flips its button.
 4. **Hot mode.** After any sign of a drop (a queue opening, stock showing anywhere, an outside alert), every interval is halved for 15 minutes, because restocks often hit several stores at once. During *warm hours* (default weekdays 7 a.m.–noon Eastern, a guess you can edit) intervals are three-quarters. You can also press **Go hot 30 min** yourself, for example when PlayStation announces a drop.
 
-Once stock is confirmed, checkout goes **straight to the checkout page**, skipping the cart, and falls back to the cart if a store insists. Timing is randomized throughout so the checks don't look robotic.
+Once stock is confirmed, checkout goes **straight to the checkout page**, skipping the cart, and falls back to the cart if a store insists. Timing is randomized throughout. If a store turns away the quick checks, that listing is watched by reloading the page every 20 seconds instead, and the dashboard shows "Reload 20s" rather than calling the store blocked. "Bot check: solve it" only appears when the page itself shows a CAPTCHA.
 
 **Measured on the fake stores** (1-second checks): restock to alert in 1.8 seconds using the stock lookup alone. Restock to placed order in 1.8 seconds. Outside alert to placed order in 1.0 second. On real sites add network time and 1–3 seconds per page load.
 

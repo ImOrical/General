@@ -221,11 +221,32 @@
     return null;
   }
 
-  function isBlocked(doc, bodyText) {
-    if (first(doc, CAPTCHA_SELECTORS)) return true;
+  // Background CAPTCHA scripts many stores load on every page (invisible
+  // reCAPTCHA and its badge). These are not a bot check you have to solve.
+  function isBackgroundCaptcha(el) {
+    const src = el.getAttribute('src') || '';
+    return /size=invisible/i.test(src) || /recaptcha\/(api2|enterprise)\/bframe/i.test(src) || !!el.closest('.grecaptcha-badge') || el.getAttribute('data-size') === 'invisible';
+  }
+
+  function isBig(el) {
+    const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    return !!r && r.width >= 150 && r.height >= 60;
+  }
+
+  // A real bot wall: a short page that is mostly a challenge, or (on the live
+  // page) a challenge widget you can actually see.
+  function isBlocked(doc, bodyText, live) {
     const title = (doc.title || '').trim();
     if (/robot check|access denied|captcha|attention required|just a moment/i.test(title)) return true;
-    return bodyText.length < 4000 && C.re(C.MATCH.blocked).test(bodyText);
+    const short = bodyText.length < 4000;
+    if (short && C.re(C.MATCH.blocked).test(bodyText)) return true;
+    for (const sel of CAPTCHA_SELECTORS) {
+      for (const el of all(doc, sel)) {
+        if (isBackgroundCaptcha(el)) continue;
+        if (short || (live && isVisible(el) && isBig(el))) return true;
+      }
+    }
+    return false;
   }
 
   function isQueue(doc, url, bodyText) {
@@ -235,9 +256,9 @@
   }
 
   // 'blocked' (CAPTCHA / bot wall), 'queue' (waiting room) or null.
-  function gate(doc, url) {
+  function gate(doc, url, opts = {}) {
     const bodyText = textOf(doc.body, 8000);
-    if (isBlocked(doc, bodyText)) return 'blocked';
+    if (isBlocked(doc, bodyText, !!opts.live)) return 'blocked';
     if (isQueue(doc, url, bodyText)) return 'queue';
     return null;
   }
@@ -248,7 +269,7 @@
     const d = store.detect || {};
     const M = C.MATCH;
     const base = { at: Date.now(), url, source: opts.live ? 'live' : 'fetch' };
-    const g = gate(doc, url);
+    const g = gate(doc, url, opts);
     if (g) return { ...base, state: g };
 
     const ld = jsonLd(doc);

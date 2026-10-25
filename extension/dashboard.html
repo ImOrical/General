@@ -68,7 +68,6 @@
         <label>Page quick check every (seconds) <input id="fetchIntervalSec" type="number" min="0" step="0.5"></label>
         <label>Full page reload every (seconds) <input id="reloadIntervalSec" type="number" min="5" step="1"></label>
         <label>Random timing spread (%) <input id="jitterPct" type="number" min="0" max="80" step="5"></label>
-        <label class="check"><input id="cacheBust" type="checkbox"> Bypass store caches on quick checks</label>
         <p class="help">It uses the store's own small stock request when it can find one (a few KB, so it can check often), and the page otherwise. Hot mode halves these for a while after any sign of a drop; warm hours use three-quarters. It never goes under 1 second and backs off on its own if a store pushes back.</p>
         <label>Stay hot for (minutes) <input id="hotMinutes" type="number" min="1" step="1"></label>
         <label>Warm hours, Eastern time <input id="hotWindows" type="text" spellcheck="false" placeholder="Mon-Fri 07:00-12:00; Sat 09:00-11:00"></label>

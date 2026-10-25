@@ -52,6 +52,8 @@ function freshRuntime() {
     apiIn: {}, // watch key -> when a quick check last said in stock
     apiMisses: {}, // watch key -> quick-check "in stock" that the real page didn't confirm
     distrust: {}, // watch key -> ignore quick checks until this time
+    refusals: {}, // watch key -> times the store refused a quick check
+    quickOff: {}, // watch key -> reloads only (store refuses quick checks) until this time
     lastTrigger: {}, // storeId -> last outside alert handled
     triggerConnected: false,
     backoff: {}, // storeId -> { level, until, fetchLevel, fetchUntil }
@@ -258,6 +260,8 @@ async function start() {
   rt.apiIn = {};
   rt.apiMisses = {};
   rt.distrust = {};
+  rt.refusals = {};
+  rt.quickOff = {};
   const now = Date.now();
   for (const [i, w] of watchList().entries()) {
     const tabId = await openRoleTab(win.id, w.url, { role: 'watch', storeId: w.storeId, key: w.key, url: w.url, lastReport: now });
@@ -365,9 +369,12 @@ function tick() {
     const st = rt.status[key] || {};
     const apiLane = st.lane === 'learned' || st.lane === 'template';
     const baseSec = apiLane ? settings.apiIntervalSec : settings.fetchIntervalSec;
-    const quickMs = baseSec > 0 ? Math.max(1000, baseSec * 1000 * factor) : 0;
-    const reloadMs = Math.max(5000, settings.reloadIntervalSec * 1000 * factor);
-    rt.speed[key] = { quickMs, reloadMs, mode };
+    // If the store refuses quick checks, watch that listing by reloading the page more often instead.
+    const quickOff = (rt.quickOff[key] || 0) > now;
+    const quickMs = baseSec > 0 && !quickOff ? Math.max(1000, baseSec * 1000 * factor) : 0;
+    const reloadSec = quickOff ? Math.min(settings.reloadIntervalSec, settings.reloadOnlySec) : settings.reloadIntervalSec;
+    const reloadMs = Math.max(5000, reloadSec * 1000 * factor);
+    rt.speed[key] = { quickMs, reloadMs, mode, quickOff };
     const n = next[key] || (next[key] = { fetch: now + jitter(quickMs || 4000), reload: now + jitter(reloadMs) });
     const bo = rt.backoff[id] || {};
     if (bo.until > now) continue;
@@ -451,7 +458,7 @@ function roleFor(tabId) {
       role: 'watch',
       storeId: role.storeId,
       store: store(role.storeId),
-      settings: { cacheBust: settings.cacheBust, distrustApi, priceCap: settings.priceCap, minPrice: settings.minPrice },
+      settings: { distrustApi, priceCap: settings.priceCap, minPrice: settings.minPrice },
     };
   }
   if (role.role === 'checkout') {
@@ -471,6 +478,25 @@ function onStatus(tabId, result) {
   const productUrl = role.url || store(id).productUrl;
   const now = Date.now();
   role.lastReport = now;
+  const quick = result.source === 'fetch' || result.source === 'api';
+
+  // The store's bot protection turned away a quick check (an error code, or a
+  // challenge page instead of the product). Not a problem with the store page,
+  // so don't show the store as blocked or ping your phone: three refusals in
+  // 10 minutes and that listing is watched by page reloads for 30 minutes.
+  if (quick && (result.state === 'refused' || result.state === 'blocked')) {
+    const recent = (rt.refusals[key] || []).filter((t) => now - t < 10 * 60000).concat(now);
+    rt.refusals[key] = recent;
+    if (rt.status[key]) rt.status[key].quickNote = `quick checks refused${result.httpStatus ? ' (HTTP ' + result.httpStatus + ')' : ''}`;
+    if (recent.length >= 3 && !((rt.quickOff[key] || 0) > now)) {
+      rt.quickOff[key] = now + 30 * 60000;
+      rt.refusals[key] = [];
+      if (next[key]) next[key].reload = Math.min(next[key].reload, now + settings.reloadOnlySec * 1000);
+      addLog('info', `${name} refuses the quick checks, so that listing is watched by reloading the page every ${settings.reloadOnlySec}s for the next 30 minutes`);
+    }
+    return { go: false };
+  }
+
   rt.status[key] = {
     state: result.state,
     source: result.source,
@@ -485,13 +511,12 @@ function onStatus(tabId, result) {
     signals: result.signals || null,
     error: result.error || (result.httpStatus ? 'HTTP ' + result.httpStatus : ''),
   };
-  const quick = result.source === 'fetch' || result.source === 'api';
 
   if (result.state === 'error') return { go: false };
   if (result.state === 'blocked') {
-    applyBackoff(id, quick ? 'fetch' : 'live');
-    const what = quick ? 'is rate-limiting the quick checks (slowing them down)' : 'is showing a bot check in the watcher tab. Solve it once so watching can continue.';
-    alert('blocked', `${name} blocked a check`, `${name} ${what}`, { key: 'blocked:' + id + ':' + (quick ? 'fetch' : 'live'), dedupeMs: 20 * 60000, tabId });
+    // A real bot check on the page itself: only a person can clear it.
+    applyBackoff(id, 'live');
+    alert('blocked', `${name} is showing a bot check`, `Open the watcher window, go to the ${name} tab and solve it once. Watching continues by itself after that.`, { key: 'blocked:' + key, dedupeMs: 20 * 60000, tabId });
     return { go: false };
   }
   clearBackoff(id, quick ? 'fetch' : 'live');

@@ -190,6 +190,18 @@ test('Akamai "Press & Hold" wall is blocked', () => {
   assert.equal(detect('walmart', html, WM_URL).state, 'blocked');
 });
 
+test("invisible reCAPTCHA on a normal page is not a bot check", () => {
+  const html = bestBuy({
+    extra: '<iframe src="https://www.google.com/recaptcha/api2/anchor?k=x&size=invisible"></iframe><div class="grecaptcha-badge"><iframe src="https://www.google.com/recaptcha/api2/anchor?k=x"></iframe></div>' + '<p>Product details. </p>'.repeat(400),
+  });
+  assert.equal(detect('bestbuy', html, BB_URL).state, 'in_stock');
+});
+
+test('a short page that is just a CAPTCHA widget is a bot check', () => {
+  const html = '<html><body><p>One more step</p><iframe src="https://www.google.com/recaptcha/api2/anchor?k=x&size=normal"></iframe></body></html>';
+  assert.equal(detect('bestbuy', html, BB_URL).state, 'blocked');
+});
+
 test('Queue-it waiting room is queue', () => {
   const html = '<html><body><h2 id="lbHeaderH2">You are now in line</h2><p>Your estimated wait time is 12 minutes</p></body></html>';
   assert.equal(detect('psdirect', html, 'https://sony.queue-it.net/?c=sony&e=ps5pro').state, 'queue');

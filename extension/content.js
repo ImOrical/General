@@ -121,18 +121,15 @@
     const t0 = performance.now();
     const base = { at: Date.now(), url: location.href, lane: lane.kind, source: lane.kind === 'html' ? 'fetch' : 'api' };
     try {
-      let url = lane.url || location.href;
-      if (lane.kind === 'html' && ctx.settings && ctx.settings.cacheBust) {
-        const u = new URL(url);
-        u.searchParams.set('_ps5', Date.now().toString(36));
-        url = u.toString();
-      }
+      const url = lane.url || location.href;
       const sameOrigin = new URL(url).origin === location.origin;
       const resp = await fetch(url, { credentials: sameOrigin ? 'include' : 'omit', cache: 'no-store', redirect: 'follow' });
       const rtt = Math.round(performance.now() - t0);
       if (resp.status === 403 || resp.status === 429 || resp.status === 503) {
+        // The store's bot protection refused this quick check. The page itself
+        // is fine; the background falls back to page reloads for this listing.
         lane.strikes++;
-        await send({ type: 'status', result: { ...base, state: 'blocked', httpStatus: resp.status, rtt } });
+        await send({ type: 'status', result: { ...base, state: 'refused', httpStatus: resp.status, rtt } });
         return;
       }
       let res;
@@ -312,7 +309,7 @@
     let clickedLink = false;
     for (let i = 0; i < 60; i++) {
       const url = location.href;
-      if (D.gate(document, url) === 'blocked') return report('needs_you', { reason: 'a CAPTCHA is showing on the sign-in check' });
+      if (D.gate(document, url, { live: true }) === 'blocked') return report('needs_you', { reason: 'a CAPTCHA is showing on the sign-in check' });
       const step = F.stepsFor(ctx.store, url).find((s) => s.signin);
       if (step) {
         const r = await autoSignIn(step);
@@ -354,7 +351,7 @@
   async function waitOutGate(kind) {
     if (kind === 'blocked') await needsYou('A CAPTCHA / bot check is showing. Solve it and checkout will continue.');
     else await event('queue', {});
-    while (D.gate(document, location.href) === kind) await sleep(1000);
+    while (D.gate(document, location.href, { live: true }) === kind) await sleep(1000);
   }
 
   async function checkout() {
@@ -371,7 +368,7 @@
       const url = location.href;
       if (F.isConfirmation(document, url, store)) return event('confirmed', { url });
 
-      const gate = D.gate(document, url);
+      const gate = D.gate(document, url, { live: true });
       if (gate) {
         await waitOutGate(gate);
         idleSince = Date.now();

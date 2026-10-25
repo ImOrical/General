@@ -151,6 +151,8 @@ const STORES = {
       return shell(
         `Sony ${PRODUCT} - Walmart.com`,
         `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialData: { data: { product } } } } })}</script>
+          <iframe title="reCAPTCHA" src="https://www.google.com/recaptcha/api2/anchor?ar=1&k=6Lc&size=invisible" width="256" height="60"></iframe>
+          <div class="grecaptcha-badge"><iframe title="reCAPTCHA" src="https://www.google.com/recaptcha/api2/anchor?k=6Lc" width="256" height="60"></iframe></div>
           <main><h1 id="main-title">Sony ${PRODUCT}</h1>
           <span itemprop="price">$${st.price.toFixed(2)}</span>
           <div data-testid="product-seller-info">Sold and shipped by ${st.seller || 'Walmart.com'}</div>
@@ -186,6 +188,8 @@ function freshStoreState() {
     pickupInStock: false,
     altInStock: false, // Best Buy's second listing (SKU 6609999)
     cartViewed: false,
+    refuseQuick: false,
+    refused: 0,
   };
 }
 
@@ -254,6 +258,12 @@ function createServer({ key, cert, port = 443 }) {
       if (p === '/payment/frame') return send(200, shell('Card', '<label>Security code <input autocomplete="cc-csc" name="cvv"></label>'));
       if (p === def.checkout && needsLogin) return redirect(`${def.signin}?return=${encodeURIComponent(p)}`);
 
+      // Bot protection that turns away background requests but lets real page loads through.
+      const isQuickCheck = req.headers['sec-fetch-mode'] !== 'navigate' && (p === def.pdp || p.startsWith('/button-state/') || p.startsWith('/redsky_'));
+      if (st.refuseQuick && isQuickCheck) {
+        st.refused++;
+        return send(403, shell('Access Denied', "<h1>Access Denied</h1><p>You don't have permission to access this resource.</p>"));
+      }
       const alt = def.id === 'bestbuy' && url.searchParams.get('skuId') === '6609999';
       const view = alt ? { ...st, inStock: st.altInStock } : st;
       if (p === def.pdp || (def.id === 'bestbuy' && p === '/site/6609999.p')) {

@@ -14,7 +14,7 @@ const STATE_PILL = {
   out_of_stock: ['Sold out', 'neutral'],
   queue: ['Queue open', 'warn'],
   invite: ['Invite only', 'warn'],
-  blocked: ['Blocked', 'bad'],
+  blocked: ['Bot check: solve it', 'bad'],
   error: ['Error', 'bad'],
   unknown: ["Can't tell", 'warn'],
 };
@@ -28,7 +28,6 @@ async function loadSettings() {
   for (const k of ['priceCap', 'minPrice', 'apiIntervalSec', 'fetchIntervalSec', 'reloadIntervalSec', 'jitterPct', 'keeperHours', 'hotMinutes', 'hotWindows']) $(k).value = settings[k];
   $('triggerTopic').value = settings.trigger.ntfyTopic || '';
   $('triggerAny').checked = !!settings.trigger.anyProduct;
-  $('cacheBust').checked = !!settings.cacheBust;
   $('autoStart').checked = !!settings.autoStart;
   for (const k of ALERT_FIELDS) $(k).value = settings.alerts[k] || '';
   $('desktop').checked = !!settings.alerts.desktop;
@@ -81,7 +80,6 @@ function readForm() {
   settings.trigger = { ntfyTopic: $('triggerTopic').value.trim(), anyProduct: $('triggerAny').checked };
   settings.reloadIntervalSec = Math.max(5, num('reloadIntervalSec'));
   settings.jitterPct = Math.min(80, Math.max(0, num('jitterPct')));
-  settings.cacheBust = $('cacheBust').checked;
   settings.autoStart = $('autoStart').checked;
   settings.keeperHours = Math.max(0, num('keeperHours'));
   for (const k of ALERT_FIELDS) settings.alerts[k] = $(k).value.trim();
@@ -229,8 +227,8 @@ function renderState(state) {
     const sp = keys.length ? rt.speed && rt.speed[keys[0]] : null;
     const speedCell = tr.querySelector('.speed');
     const laneName = { learned: 'API', template: 'API', html: 'Page' };
-    speedCell.textContent = st && sp ? `${laneName[st.lane] || 'Page'} ${sp.quickMs ? (sp.quickMs / 1000).toFixed(1) + 's' : 'reload'}${st.rtt != null ? ' · ' + st.rtt + 'ms' : ''}${keys.length > 1 ? ` · ×${keys.length}` : ''}` : '-';
-    speedCell.title = st ? `Quick check: ${st.lane || 'page'}${st.signal ? ' (' + st.signal + ')' : ''}. Full reload every ${sp ? (sp.reloadMs / 1000).toFixed(0) : '?'}s.` : '';
+    speedCell.textContent = !st || !sp ? '-' : sp.quickOff ? `Reload ${(sp.reloadMs / 1000).toFixed(0)}s${keys.length > 1 ? ` · ×${keys.length}` : ''}` : `${laneName[st.lane] || 'Page'} ${sp.quickMs ? (sp.quickMs / 1000).toFixed(1) + 's' : 'reload'}${st.rtt != null ? ' · ' + st.rtt + 'ms' : ''}${keys.length > 1 ? ` · ×${keys.length}` : ''}`;
+    speedCell.title = !st ? '' : sp && sp.quickOff ? `This store refuses the quick checks, so the page is reloaded every ${(sp.reloadMs / 1000).toFixed(0)}s instead. That still catches restocks.` : `Quick check: ${st.lane || 'page'}${st.signal ? ' (' + st.signal + ')' : ''}${st.quickNote ? '; ' + st.quickNote : ''}. Full reload every ${sp ? (sp.reloadMs / 1000).toFixed(0) : '?'}s.`;
     const si = rt.signin && rt.signin[id];
     const siCell = tr.querySelector('.signin');
     siCell.textContent = si ? { ok: 'Yes', auto: 'Yes (re-signed in)', needs_you: 'No: sign in', timeout: 'Unknown' }[si.state] || si.state : '-';
