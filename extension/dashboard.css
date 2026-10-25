@@ -65,7 +65,7 @@ label { display: block; margin: 8px 0; color: var(--muted); font-size: 13px; }
 label input[type="text"], label input[type="url"], label input[type="number"], label input[type="password"] { display: block; width: 100%; margin-top: 4px; }
 label.check { display: flex; gap: 8px; align-items: center; color: var(--text); }
 input, textarea, button { font: inherit; color: inherit; }
-input[type="text"], input[type="url"], input[type="number"], input[type="password"], textarea {
+input[type="text"], input[type="url"], input[type="number"], input[type="password"], input[type="email"], textarea {
   background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
 }
 textarea { width: 100%; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
@@ -118,3 +118,9 @@ td.seller { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-s
 
 details > summary { cursor: pointer; list-style: none; }
 details > summary h2 { display: inline; }
+
+.vault-grid { display: grid; grid-template-columns: 140px 1fr 1fr; gap: 6px 10px; align-items: center; margin: 8px 0; }
+.vault-grid .store { font-weight: 600; font-size: 13px; }
+.vault-grid input { width: 100%; }
+@media (max-width: 700px) { .vault-grid { grid-template-columns: 1fr; } }
+td.signin { white-space: nowrap; }

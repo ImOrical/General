@@ -1,7 +1,8 @@
 // Runs on every store page. Does nothing unless the background worker says this
-// tab is a watcher (report stock) or a checkout tab (click through to the order).
+// tab is a watcher (report stock), a checkout tab (click through to the order) or
+// a keeper tab (make sure we're signed in). In iframes it only fills the CVV.
 (function () {
-  if (window.top !== window || window.__ps5Loaded) return;
+  if (window.__ps5Loaded) return;
   window.__ps5Loaded = true;
 
   const C = PS5Config;
@@ -9,6 +10,11 @@
   const F = PS5Flow;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const send = (msg) => chrome.runtime.sendMessage(msg).catch(() => null);
+
+  if (window.top !== window) {
+    frameCvv();
+    return;
+  }
 
   let ctx = null;
   let role = 'none';
@@ -28,6 +34,7 @@
     role = reply.role;
     if (role === 'watch') watch();
     else if (role === 'checkout') checkout();
+    else if (role === 'keeper') keeper();
   }
 
   // ---------------------------------------------------------------- watching
@@ -144,6 +151,135 @@
     return 'timeout';
   }
 
+  // ---------------------------------------------------------------- CVV and sign-in
+
+  const filledCvv = new WeakSet();
+  let cvvProblem = null;
+
+  // Fills any empty CVV box on the page. Returns false if one is there but we
+  // have no CVV to give it (vault locked or nothing saved).
+  async function fillCvv() {
+    const fields = F.emptyCvvFields(document, ctx.store, { live: true }).filter((el) => !filledCvv.has(el));
+    if (!fields.length) return true;
+    const reply = await send({ type: 'cvv' });
+    if (!reply || !reply.cvv) {
+      cvvProblem = (reply && reply.error) || 'no CVV saved';
+      return false;
+    }
+    for (const el of fields) {
+      setInputValue(el, reply.cvv);
+      filledCvv.add(el);
+    }
+    await sleep(300);
+    return true;
+  }
+
+  function framesWithEmptyCvv() {
+    for (const frame of document.querySelectorAll('iframe')) {
+      try {
+        const d = frame.contentDocument;
+        if (d && d.body && F.emptyCvvFields(d, null, { live: true }).length) return true;
+      } catch (_) {
+        // Cross-origin frame: can't look inside, its own script handles it.
+      }
+    }
+    return false;
+  }
+
+  // Card boxes embedded in an iframe. The background only hands over the CVV
+  // when the top page is one of our checkout tabs.
+  function frameCvv() {
+    const filled = new WeakSet();
+    let busy = false;
+    let refusedUntil = 0;
+    const tryFill = async () => {
+      if (busy || Date.now() < refusedUntil) return;
+      const fields = F.emptyCvvFields(document, null, { live: true }).filter((el) => !filled.has(el));
+      if (!fields.length) return;
+      busy = true;
+      const reply = await send({ type: 'cvv' });
+      busy = false;
+      if (!reply || !reply.cvv) {
+        refusedUntil = Date.now() + 10000;
+        return;
+      }
+      for (const el of fields) {
+        setInputValue(el, reply.cvv);
+        filled.add(el);
+      }
+    };
+    let timer = null;
+    const observer = new MutationObserver(() => {
+      if (!timer) timer = setTimeout(() => ((timer = null), tryFill()), 400);
+    });
+    observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['style', 'class', 'hidden'] });
+    setTimeout(() => observer.disconnect(), 10 * 60000);
+    tryFill();
+  }
+
+  const signinTries = { email: 0, password: 0 };
+  let signinSince = 0;
+
+  // Signs in with the login saved in the vault. Returns 'submitted', 'wait'
+  // (form not rendered yet) or { reason } when a person has to do it.
+  async function autoSignIn(step) {
+    signinSince = signinSince || Date.now();
+    const act = F.signInAction(document, ctx.store, { live: true });
+    if (act.kind === 'otp') return { reason: `${step.needsUser}: enter the verification code the store just sent you` };
+    if (act.kind === 'none') {
+      if (Date.now() - signinSince < 8000) return 'wait';
+      return { reason: `${step.needsUser} (couldn't find the sign-in form)` };
+    }
+    if (signinTries[act.kind] >= 2) return { reason: `${step.needsUser} (sign-in isn't going through; check the saved password)` };
+    const creds = await send({ type: 'signin', kind: act.kind });
+    if (!creds || creds.error) return { reason: `${step.needsUser} (${(creds && creds.error) || 'no saved login'})` };
+    if (!act.submit) return { reason: `${step.needsUser} (couldn't find the Sign in button)` };
+    if (act.email && !act.email.value) setInputValue(act.email, creds.email);
+    if (act.password) setInputValue(act.password, creds.password);
+    if (act.remember && !act.remember.checked) act.remember.click();
+    signinTries[act.kind]++;
+    await sleep(300);
+    click(act.submit);
+    return 'submitted';
+  }
+
+  // ---------------------------------------------------------------- session keeper
+
+  // Opened every few hours on each store's account page: if we've been signed
+  // out, sign back in now rather than in the middle of a drop.
+  async function keeper() {
+    const report = (result, extra = {}) => send({ type: 'keeper', result, url: location.href, ...extra });
+    await sleep(1500);
+    let clickedLink = false;
+    for (let i = 0; i < 60; i++) {
+      const url = location.href;
+      if (D.gate(document, url) === 'blocked') return report('needs_you', { reason: 'a CAPTCHA is showing on the sign-in check' });
+      const step = F.stepsFor(ctx.store, url).find((s) => s.signin);
+      if (step) {
+        const r = await autoSignIn(step);
+        if (r === 'submitted' || r === 'wait') {
+          await sleep(r === 'wait' ? 500 : 2500);
+          continue;
+        }
+        return report('needs_you', { reason: r.reason });
+      }
+      const link = F.signedOutLink(document, ctx.store, { live: true });
+      if (link && clickedLink) return report('needs_you', { reason: "still signed out after clicking Sign in" });
+      if (link) {
+        clickedLink = true;
+        click(link);
+        await sleep(3000);
+        continue;
+      }
+      if (i < 2) {
+        await sleep(500);
+        continue;
+      }
+      return report('ok');
+    }
+    return report('needs_you', { reason: 'the sign-in check timed out' });
+  }
+
   async function waitClickable(spec, timeoutMs) {
     const end = Date.now() + timeoutMs;
     while (Date.now() < end) {
@@ -182,6 +318,7 @@
         idleSince = Date.now();
         continue;
       }
+      await fillCvv();
 
       const steps = F.stepsFor(store, url);
       // Carts often render "empty" for a moment before items load, so require 4s of it.
@@ -197,10 +334,19 @@
         await sleep(500);
         continue;
       }
-      const signIn = steps.find((s) => s.needsUser);
+      const signIn = steps.find((s) => s.signin);
       if (signIn) {
-        await needsYou(signIn.needsUser);
-        await sleep(1000);
+        const r = await autoSignIn(signIn);
+        if (r === 'submitted') {
+          await event('step', { step: 'signin' });
+          idleSince = Date.now();
+          await sleep(2000);
+        } else if (r === 'wait') {
+          await sleep(500);
+        } else {
+          await needsYou(r.reason);
+          await sleep(1000);
+        }
         continue;
       }
 
@@ -273,15 +419,11 @@
     await event('guard', { subtotal: guard.subtotal, problems: guard.problems });
     if (!guard.ok) return needsYou('Stopped before Place Order: ' + guard.problems.join('; '));
 
-    const cvvField = D.first(document, step.cvv || []);
-    if (cvvField && !cvvField.value) {
-      const reply = await send({ type: 'cvv' });
-      if (reply && reply.cvv) {
-        setInputValue(cvvField, reply.cvv);
-        await sleep(400);
-      } else if (cc.mode === 'armed' && !cc.practice) {
-        return needsYou('Enter your card security code (CVV), then press Place Order');
-      }
+    // A CVV box inside an iframe is filled by that frame's own script; give it a moment.
+    for (let i = 0; i < 12 && framesWithEmptyCvv(); i++) await sleep(250);
+    const cvvOk = (await fillCvv()) && !framesWithEmptyCvv();
+    if (!cvvOk && cc.mode === 'armed' && !cc.practice) {
+      return needsYou(`Card security code (CVV) needed and ${cvvProblem || 'it could not be filled in'}. Type it and press Place Order, or save it in the vault on the dashboard.`);
     }
 
     const btn = found.el || (await waitClickable(step.click, 8000));

@@ -18,6 +18,10 @@
     psdirect: {
       name: 'PlayStation Direct',
       hosts: ['direct.playstation.com'],
+      // Signed-in check for the session keeper. PS Direct has no simple account
+      // page, so the cart is used and a visible "Sign In" link means signed out.
+      accountUrl: 'https://direct.playstation.com/en-us/cart',
+      signin: { email: ['#signin-entrance-input-signinId'], password: ['#signin-password-input-password'], submit: ['#signin-entrance-button', '#signin-password-button'] },
       productUrl: 'https://direct.playstation.com/en-us/buy-consoles/playstation5-pro-console-2-tb',
       firstPartySeller: null, // Sony sells everything on PS Direct
       sellerMissingMeansFirstParty: true,
@@ -32,7 +36,7 @@
       checkout: {
         cartUrl: 'https://direct.playstation.com/en-us/cart',
         steps: [
-          { id: 'signin', url: 'my\\.account\\.sony\\.com|/signin|/login', needsUser: 'Sign in to your PlayStation account' },
+          { id: 'signin', url: 'my\\.account\\.sony\\.com|/signin|/login', signin: true, needsUser: 'Sign in to your PlayStation account' },
           { id: 'pdp', url: 'direct\\.playstation\\.com/[a-z-]+/buy-', click: { selectors: ['button.add-to-cart:not(.hide)'], text: '^add to cart$', scope: ['.productHero-desktop', 'main'] }, waitText: 'please wait|adding', after: { navigate: 'cart', waitFor: 'added to (your )?cart|view cart|cart \\(1\\)', timeoutMs: 4000 } },
           { id: 'cart', url: 'direct\\.playstation\\.com/[a-z-]+/cart', click: { selectors: ['button.checkout-btn', 'a.checkout-btn'], text: '^(proceed to )?check ?out$' } },
           { id: 'place', url: 'direct\\.playstation\\.com/[a-z-]+/checkout', final: true, click: { selectors: ['button.place-order', 'button[name="placeOrder"]'], text: '^place (your )?order$' }, cvv: ['input[name*="cvv" i]', 'input[id*="cvv" i]', 'input[name*="securityCode" i]'] },
@@ -45,6 +49,8 @@
     bestbuy: {
       name: 'Best Buy',
       hosts: ['www.bestbuy.com'],
+      accountUrl: 'https://www.bestbuy.com/site/customer/myaccount',
+      signin: { email: ['#fld-e'], password: ['#fld-p1'], submit: ['button.cia-form__controls__submit'] },
       productUrl: 'https://www.bestbuy.com/site/6601524.p?skuId=6601524',
       firstPartySeller: 'best\\s*buy',
       // Best Buy's marketplace listings show a "Sold by" line; its own listings usually don't.
@@ -60,7 +66,7 @@
       checkout: {
         cartUrl: 'https://www.bestbuy.com/cart',
         steps: [
-          { id: 'signin', url: 'bestbuy\\.com/identity/', needsUser: 'Sign in to Best Buy' },
+          { id: 'signin', url: 'bestbuy\\.com/identity/', signin: true, needsUser: 'Sign in to Best Buy' },
           { id: 'pdp', url: 'bestbuy\\.com/(site|product)/', click: { selectors: ['button.add-to-cart-button', 'button[data-test-id="add-to-cart"]'], text: '^add to cart$', scope: ['.fulfillment-add-to-cart-button', '[data-testid="fulfillment-add-to-cart-button"]', 'main'] }, waitText: 'please wait', after: { navigate: 'cart', waitFor: 'added to cart|go to cart|cart \\(1\\)', timeoutMs: 4000 } },
           { id: 'cart', url: 'bestbuy\\.com/cart', click: { selectors: ['.checkout-buttons__checkout button', 'button[data-track="Checkout - Top"]'], text: '^check ?out$' } },
           { id: 'place', url: 'bestbuy\\.com/checkout', final: true, click: { selectors: ['.button__fast-track', 'button[data-track="Place your Order - Contact Card"]'], text: '^place (your )?order$' }, cvv: ['#cvv', 'input[name="cvv"]', '#credit-card-cvv', 'input[id*="cvv" i]'] },
@@ -73,6 +79,8 @@
     target: {
       name: 'Target',
       hosts: ['www.target.com'],
+      accountUrl: 'https://www.target.com/account',
+      signin: { email: ['#username'], password: ['#password'], submit: ['#login'] },
       productUrl: 'https://www.target.com/p/playstation-5-pro-console/-/A-93620188',
       firstPartySeller: '^\\s*target\\s*$|sold (and|&) shipped by target\\b',
       // Target Plus partner listings say "Sold and shipped by <partner>"; Target's own don't.
@@ -88,7 +96,7 @@
       checkout: {
         cartUrl: 'https://www.target.com/cart',
         steps: [
-          { id: 'signin', url: 'target\\.com/(login|account/signin)', needsUser: 'Sign in to Target' },
+          { id: 'signin', url: 'target\\.com/(login|account/signin)|login\\.target\\.com', signin: true, needsUser: 'Sign in to Target' },
           { id: 'pdp', url: 'target\\.com/p/', click: { selectors: ['button[data-test="shipItButton"]', 'button[data-test="shippingButton"]', 'button[id^="addToCartButton"]'], text: '^(add to cart|ship it)$', scope: ['[data-test="flexible-fulfillment"]', 'main'] }, after: { navigate: 'cart', waitFor: 'added to cart|view cart', timeoutMs: 4000 } },
           { id: 'cart', url: 'target\\.com/cart', click: { selectors: ['button[data-test="checkout-button"]'], text: '^(check ?out|i\'m ready to check ?out)$' } },
           { id: 'place', url: 'target\\.com/checkout', final: true, click: { selectors: ['button[data-test="placeOrderButton"]'], text: '^place (your )?order$' }, cvv: ['#creditCardInput-cvv', 'input[name="cvv"]', 'input[id*="cvv" i]'] },
@@ -101,6 +109,8 @@
     walmart: {
       name: 'Walmart',
       hosts: ['www.walmart.com'],
+      accountUrl: 'https://www.walmart.com/account',
+      signin: { email: [], password: [], submit: [] },
       // Check this is the "Sold and shipped by Walmart.com" listing before relying on it.
       productUrl: 'https://www.walmart.com/ip/Sony-PlayStation-5-Pro-Console-PS5-Pro/18235967161',
       // "Fulfilled by Walmart" doesn't count: that's a third-party seller using Walmart shipping.
@@ -119,7 +129,7 @@
       checkout: {
         cartUrl: 'https://www.walmart.com/cart',
         steps: [
-          { id: 'signin', url: 'walmart\\.com/account/login', needsUser: 'Sign in to Walmart' },
+          { id: 'signin', url: '(identity\\.)?walmart\\.com/account/login', signin: true, needsUser: 'Sign in to Walmart' },
           { id: 'pdp', url: 'walmart\\.com/ip/', click: { selectors: ['button[data-automation-id="atc"]', '[data-dca-name="ItemBuyBoxAddToCartButton"]'], text: '^add to cart$', scope: ['[data-testid="add-to-cart-section"]', 'main'] }, after: { navigate: 'cart', waitFor: 'added to cart|view cart|cart \\(1\\)', timeoutMs: 4000 } },
           { id: 'cart', url: 'walmart\\.com/cart', click: { selectors: ['button[data-automation-id="checkout"]'], text: '^continue to checkout$' } },
           { id: 'place', url: 'walmart\\.com/checkout', final: true, click: { selectors: ['button[data-automation-id="place-order-button"]'], text: '^place order$' }, cvv: ['input[name="cvv"]', 'input[id*="cvv" i]'] },
@@ -132,6 +142,8 @@
     amazon: {
       name: 'Amazon',
       hosts: ['www.amazon.com'],
+      accountUrl: 'https://www.amazon.com/gp/css/order-history',
+      signin: { email: ['#ap_email', '#ap_email_login'], password: ['#ap_password'], submit: ['#signInSubmit', 'input#continue', '#continue'] },
       // Paste the listing that says "Ships from Amazon.com, Sold by Amazon.com".
       productUrl: '',
       firstPartySeller: 'sold by\\s*:?\\s*amazon(\\.com)?\\b(?!\\s*(resale|warehouse|renewed))',
@@ -148,7 +160,7 @@
       checkout: {
         cartUrl: 'https://www.amazon.com/gp/cart/view.html',
         steps: [
-          { id: 'signin', url: 'amazon\\.com/ap/(signin|mfa|cvf)', needsUser: 'Sign in to Amazon' },
+          { id: 'signin', url: 'amazon\\.com/ap/(signin|mfa|cvf)', signin: true, needsUser: 'Sign in to Amazon' },
           { id: 'pdp', url: 'amazon\\.com/(.*/)?(dp|gp/product)/', click: { selectors: ['#add-to-cart-button'], text: '^add to cart$', scope: ['#desktop_buybox', '#buybox', '#rightCol'] }, after: { navigate: 'cart', waitFor: 'added to cart|proceed to checkout|no thanks', timeoutMs: 4000 } },
           { id: 'cart', url: 'amazon\\.com/(gp/cart|cart)', click: { selectors: ['input[name="proceedToRetailCheckout"]', '#sc-buy-box-ptc-button input'], text: '^proceed to checkout' } },
           { id: 'place', url: 'amazon\\.com/(gp/buy|checkout)', final: true, click: { selectors: ['#submitOrderButtonId input', 'input[name="placeYourOrder1"]', '#placeOrder', '#bottomSubmitOrderButtonId input'], text: '^place your order$' }, cvv: [] },
@@ -161,6 +173,8 @@
     gamestop: {
       name: 'GameStop',
       hosts: ['www.gamestop.com'],
+      accountUrl: 'https://www.gamestop.com/account/',
+      signin: { email: ['#login-form-email'], password: ['#login-form-password'], submit: [] },
       productUrl: 'https://www.gamestop.com/consoles-hardware/playstation-5/consoles/products/sony-playstation-5-pro-console/20015604.html?condition=New',
       firstPartySeller: null,
       sellerMissingMeansFirstParty: true,
@@ -176,7 +190,7 @@
       checkout: {
         cartUrl: 'https://www.gamestop.com/cart/',
         steps: [
-          { id: 'signin', url: 'gamestop\\.com/(login|account/login)', needsUser: 'Sign in to GameStop' },
+          { id: 'signin', url: 'gamestop\\.com/(login|account/login)', signin: true, needsUser: 'Sign in to GameStop' },
           { id: 'pdp', url: 'gamestop\\.com/.*/products/', click: { selectors: ['button.add-to-cart'], text: '^add to cart$', scope: ['.primary-details-row', '.add-to-cart-buttons', 'main'] }, after: { navigate: 'cart', waitFor: 'added to cart|view cart', timeoutMs: 4000 } },
           { id: 'cart', url: 'gamestop\\.com/cart', click: { selectors: ['a.checkout-btn', 'button.checkout-btn'], text: '^(proceed to )?check ?out$' } },
           { id: 'place', url: 'gamestop\\.com/(checkout|spcheckout)', final: true, click: { selectors: ['button.place-order', 'button[value="place-order"]'], text: '^place order$' }, cvv: ['input[name*="securityCode" i]', 'input#saved-payment-security-code', 'input[id*="cvv" i]'] },
@@ -198,6 +212,11 @@
     reloadIntervalSec: 40,
     jitterPct: 30,
     cacheBust: true,
+    // Re-open the watcher automatically when Chrome starts.
+    autoStart: true,
+    // How often to check every store still has you signed in (0 = never).
+    keeperHours: 3,
+    // Legacy plain-text CVV; the encrypted vault replaces it.
     cvv: '',
     alerts: {
       ntfyServer: 'https://ntfy.sh',
@@ -205,6 +224,8 @@
       pushoverUser: '',
       pushoverToken: '',
       discordWebhook: '',
+      // Where tapping a "needs you" alert goes, e.g. Chrome Remote Desktop.
+      needsYouLink: '',
       desktop: true,
       siren: true,
     },
@@ -230,6 +251,8 @@
     blocked: 'robot check|robot or human|are you a (human|robot)|verify (that )?you are (a )?human|press (&|and) hold|unusual traffic|(type|enter) the characters you see|request blocked|pardon our interruption|you don\'t have permission to access',
     queue: 'you are now in line|you\'re in line|waiting room|your estimated wait time|number in line|queue-it',
     emptyCart: 'your (shopping )?(cart|bag) is empty|cart is empty|no items in (your )?cart',
+    otp: '(enter|type) (the|your|a) (\\d-digit )?(verification|security|one[- ]time|sign[- ]in) (code|passcode)|we (just )?(sent|texted|emailed) (a|you a|your) (\\d-digit )?(code|passcode)|one[- ]time (pass)?code|two[- ]step verification|enter otp',
+    signedOut: '^(sign ?in|log ?in|sign in or create account|sign in / create account|account sign in)$',
   };
 
   function isPlainObject(v) {

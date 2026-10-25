@@ -7,6 +7,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { chromium } = require('playwright');
 const { createServer, freshStoreState } = require('./mockstores.js');
+const V = require('../../extension/lib/vault.js');
 
 const EXT = path.resolve(__dirname, '../../extension');
 const TMP = path.join(__dirname, '.tmp');
@@ -49,7 +50,10 @@ function settingsFor(mode, enabled, extra = {}) {
   };
 }
 
-async function launch(settings) {
+const VAULT = { cvv: '123', logins: { bestbuy: { email: 'me@example.com', password: 'hunter2!' }, target: { email: 'me@example.com', password: 'hunter2!' } } };
+
+// vault: 'open' (unlocked with VAULT), 'locked' (saved but not unlocked) or null.
+async function launch(settings, { vault = 'open', start: doStart = true } = {}) {
   const dir = fs.mkdtempSync(path.join(TMP, 'profile-'));
   const rules = mock.hosts.map((h) => `MAP ${h} 127.0.0.1`).concat('MAP * ~NOTFOUND').join(', ');
   const ctx = await chromium.launchPersistentContext(dir, {
@@ -60,12 +64,18 @@ async function launch(settings) {
   });
   let [sw] = ctx.serviceWorkers();
   if (!sw) sw = await ctx.waitForEvent('serviceworker');
-  const started = await sw.evaluate(async (s) => {
-    await ready;
-    await chrome.storage.local.set({ settings: s });
-    settings = PS5Config.resolveSettings(s);
-    return start();
-  }, settings);
+  const sealed = vault ? await V.seal(VAULT, 'test passphrase') : null;
+  const started = await sw.evaluate(
+    async ({ s, vault, sealed, data, doStart }) => {
+      await ready;
+      await chrome.storage.local.set({ settings: s });
+      settings = PS5Config.resolveSettings(s);
+      if (sealed) await chrome.storage.local.set({ vault: sealed });
+      if (vault === 'open') await chrome.storage.session.set({ vaultOpen: data });
+      return doStart ? start() : { ok: true };
+    },
+    { s: settings, vault, sealed, data: VAULT, doStart }
+  );
   assert.deepEqual(started, { ok: true });
   const state = () => sw.evaluate(() => ({ rt, purchased, log }));
   return { ctx, sw, state, close: () => ctx.close().finally(() => fs.rmSync(dir, { recursive: true, force: true })) };
@@ -184,7 +194,7 @@ test('Best Buy "Please Wait" queue button: waits its turn, then buys', async () 
   }
 });
 
-test('CVV: fills it from settings when the store asks', async () => {
+test('CVV: fills it in when the store asks', async () => {
   Object.assign(mock.state.stores.bestbuy, { inStock: true, requireCvv: true });
   const b = await launch(settingsFor('armed', ['bestbuy'], { cvv: '123' }));
   try {
@@ -217,6 +227,107 @@ test('extra items in the cart: refuses to place the order', async () => {
     assert.equal(mock.state.orders.length, 0);
     const s = await b.state();
     assert.match(logText(s), /over your \$899.99 cap/);
+  } finally {
+    await b.close();
+  }
+});
+
+// ---------------------------------------------------------------- sign-in, CVV, keeper
+
+test('signed out at checkout: signs in from the vault (ticking "keep me signed in") and still buys', async () => {
+  Object.assign(mock.state.stores.bestbuy, { inStock: true, requireLogin: true });
+  const b = await launch(settingsFor('armed', ['bestbuy']));
+  try {
+    await waitFor(() => mock.state.orders.length === 1, { timeout: 40000, what: 'an order after signing in' });
+    assert.deepEqual(mock.state.stores.bestbuy.logins, [{ email: 'me@example.com', remember: true }]);
+  } finally {
+    await b.close();
+  }
+});
+
+test('email-first sign-in (Target style) and a CVV box inside an iframe', async () => {
+  Object.assign(mock.state.stores.target, { inStock: true, requireLogin: true, requireCvv: true, cvvInFrame: true });
+  const b = await launch(settingsFor('armed', ['target']));
+  try {
+    await waitFor(() => mock.state.orders.length === 1, { timeout: 40000, what: 'an order' });
+    assert.equal(mock.state.orders[0].cvv, '123');
+    assert.equal(mock.state.stores.target.logins.length, 1);
+  } finally {
+    await b.close();
+  }
+});
+
+test('one-time code after the password: alerts you, never orders', async () => {
+  Object.assign(mock.state.stores.bestbuy, { inStock: true, requireLogin: true, otp: true });
+  const b = await launch(settingsFor('armed', ['bestbuy']));
+  try {
+    await waitFor(() => mock.state.ntfy.some((n) => /verification code/.test(n.body)), { timeout: 40000, what: 'code push' });
+    assert.equal(mock.state.orders.length, 0);
+  } finally {
+    await b.close();
+  }
+});
+
+test('vault locked: tells you to unlock it instead of failing silently', async () => {
+  Object.assign(mock.state.stores.bestbuy, { inStock: true, requireLogin: true });
+  const b = await launch(settingsFor('armed', ['bestbuy']), { vault: 'locked' });
+  try {
+    await waitFor(() => mock.state.ntfy.some((n) => /vault is locked/.test(n.body)), { timeout: 40000, what: 'vault-locked push' });
+    assert.ok(mock.state.ntfy.some((n) => /LOCKED/.test(n.body)), 'the start message warned about the locked vault');
+    assert.equal(mock.state.orders.length, 0);
+  } finally {
+    await b.close();
+  }
+});
+
+test('session keeper: notices you were signed out and signs back in ahead of a drop', async () => {
+  Object.assign(mock.state.stores.bestbuy, { requireLogin: true });
+  Object.assign(mock.state.stores.target, { requireLogin: true });
+  const b = await launch(settingsFor('monitor', ['bestbuy', 'target']), { start: false });
+  try {
+    await b.sw.evaluate(() => runKeeper());
+    let s = await b.state();
+    assert.equal(s.rt.signin.bestbuy.state, 'auto', JSON.stringify(s.rt.signin));
+    assert.equal(s.rt.signin.target.state, 'auto', JSON.stringify(s.rt.signin));
+    await b.sw.evaluate(() => runKeeper());
+    s = await b.state();
+    assert.equal(s.rt.signin.bestbuy.state, 'ok', 'second check finds the session still good');
+    assert.equal(mock.state.stores.bestbuy.logins.length, 1, 'did not sign in twice');
+    const keeperTabs = await b.sw.evaluate(async () => (await chrome.tabs.query({})).filter((t) => /myaccount|\/account/.test(t.url)).length);
+    assert.equal(keeperTabs, 0, 'check tabs were closed');
+  } finally {
+    await b.close();
+  }
+});
+
+test('dashboard vault: save encrypted, lock, wrong passphrase, unlock', async () => {
+  const b = await launch(settingsFor('monitor', ['bestbuy']), { vault: null, start: false });
+  try {
+    const id = new URL(b.sw.url()).host;
+    const page = await b.ctx.newPage();
+    await page.goto(`chrome-extension://${id}/dashboard.html`);
+    await page.fill('#vaultLogins input[data-store="bestbuy"][data-field="email"]', 'me@example.com');
+    await page.fill('#vaultLogins input[data-store="bestbuy"][data-field="password"]', 'hunter2!');
+    await page.fill('#vaultCvv', '123');
+    await page.fill('#vaultPass', 'my passphrase');
+    await page.click('#vaultSave');
+    await page.waitForFunction(() => /Saved 1 login/.test(document.getElementById('vaultMsg').textContent));
+    const stored = await b.sw.evaluate(async () => ({ local: (await chrome.storage.local.get('vault')).vault, open: (await chrome.storage.session.get('vaultOpen')).vaultOpen }));
+    assert.ok(stored.local.ct && !JSON.stringify(stored.local).includes('hunter2'), 'saved encrypted');
+    assert.equal(stored.open.logins.bestbuy.password, 'hunter2!');
+
+    await page.click('#vaultLock');
+    await page.waitForFunction(() => document.getElementById('vaultStatus').textContent === 'Locked');
+    assert.equal(await b.sw.evaluate(async () => (await chrome.storage.session.get('vaultOpen')).vaultOpen || null), null);
+
+    await page.fill('#vaultPass', 'nope nope');
+    await page.click('#vaultUnlock');
+    await page.waitForFunction(() => /Wrong passphrase/.test(document.getElementById('vaultMsg').textContent));
+
+    await page.fill('#vaultPass', 'my passphrase');
+    await page.click('#vaultUnlock');
+    await page.waitForFunction(() => document.getElementById('vaultStatus').textContent === 'Unlocked');
+    assert.equal(await page.inputValue('#vaultLogins input[data-store="bestbuy"][data-field="email"]'), 'me@example.com');
   } finally {
     await b.close();
   }

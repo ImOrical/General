@@ -333,7 +333,7 @@
     return { ok: true, alert: true, reasons: [] };
   }
 
-  const api = { textOf, labelOf, findClickable, isEnabled, parseMoney, jsonLd, nextData, gate, detect, evaluate, first };
+  const api = { textOf, labelOf, findClickable, isEnabled, isVisible, parseMoney, jsonLd, nextData, gate, detect, evaluate, first };
   root.PS5Detect = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

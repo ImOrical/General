@@ -2,6 +2,8 @@ const C = PS5Config;
 const $ = (id) => document.getElementById(id);
 const send = (msg) => chrome.runtime.sendMessage(msg).catch(() => null);
 
+const ALERT_FIELDS = ['ntfyTopic', 'ntfyServer', 'pushoverUser', 'pushoverToken', 'discordWebhook', 'needsYouLink'];
+
 const MODE_HELP = {
   monitor: 'Monitor: alerts your phone and PC the moment it is in stock. Never adds to cart.',
   dryrun: 'Dry run: on a drop it adds to cart and goes all the way to Place Order, then stops and alerts you to click it.',
@@ -23,9 +25,10 @@ let lastState = null;
 async function loadSettings() {
   const { settings: saved } = await chrome.storage.local.get('settings');
   settings = C.resolveSettings(saved);
-  for (const k of ['priceCap', 'minPrice', 'fetchIntervalSec', 'reloadIntervalSec', 'jitterPct', 'cvv']) $(k).value = settings[k];
+  for (const k of ['priceCap', 'minPrice', 'fetchIntervalSec', 'reloadIntervalSec', 'jitterPct', 'keeperHours']) $(k).value = settings[k];
   $('cacheBust').checked = !!settings.cacheBust;
-  for (const k of ['ntfyTopic', 'ntfyServer', 'pushoverUser', 'pushoverToken', 'discordWebhook']) $(k).value = settings.alerts[k] || '';
+  $('autoStart').checked = !!settings.autoStart;
+  for (const k of ALERT_FIELDS) $(k).value = settings.alerts[k] || '';
   $('desktop').checked = !!settings.alerts.desktop;
   $('siren').checked = !!settings.alerts.siren;
   $('overrides').value = JSON.stringify(settings.overrides || {}, null, 2);
@@ -51,6 +54,7 @@ function buildStoreRows() {
       <td class="price">-</td>
       <td class="seller" title="">-</td>
       <td class="age">-</td>
+      <td class="signin">-</td>
       <td><button class="small practice">Practice</button></td>`;
     const s = settings.stores[id] || {};
     tr.querySelector('.enabled').checked = !!s.enabled;
@@ -71,8 +75,9 @@ function readForm() {
   settings.reloadIntervalSec = Math.max(5, num('reloadIntervalSec'));
   settings.jitterPct = Math.min(80, Math.max(0, num('jitterPct')));
   settings.cacheBust = $('cacheBust').checked;
-  settings.cvv = $('cvv').value.trim();
-  for (const k of ['ntfyTopic', 'ntfyServer', 'pushoverUser', 'pushoverToken', 'discordWebhook']) settings.alerts[k] = $(k).value.trim();
+  settings.autoStart = $('autoStart').checked;
+  settings.keeperHours = Math.max(0, num('keeperHours'));
+  for (const k of ALERT_FIELDS) settings.alerts[k] = $(k).value.trim();
   if (!settings.alerts.ntfyServer) settings.alerts.ntfyServer = 'https://ntfy.sh';
   settings.alerts.desktop = $('desktop').checked;
   settings.alerts.siren = $('siren').checked;
@@ -185,6 +190,10 @@ function renderState(state) {
     sellerCell.textContent = seller;
     sellerCell.title = seller;
     tr.querySelector('.age').textContent = st ? `${ago(st.at)} (${st.source})` : '-';
+    const si = rt.signin && rt.signin[id];
+    const siCell = tr.querySelector('.signin');
+    siCell.textContent = si ? { ok: 'Yes', auto: 'Yes (re-signed in)', needs_you: 'No: sign in', timeout: 'Unknown' }[si.state] || si.state : '-';
+    siCell.title = si ? `${si.reason || ''} ${ago(si.at)}`.trim() : '';
   }
 
   const ol = $('log');
@@ -272,5 +281,120 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
-loadSettings().then(refresh);
+// ---------------------------------------------------------------- vault
+
+let vaultPass = null; // remembered only while this page is open, to re-save edits
+
+function buildVaultRows() {
+  const box = $('vaultLogins');
+  box.textContent = '';
+  for (const [id, def] of Object.entries(C.STORES)) {
+    const name = document.createElement('span');
+    name.className = 'store';
+    name.textContent = def.name;
+    const email = document.createElement('input');
+    email.type = 'email';
+    email.placeholder = 'Email';
+    email.autocomplete = 'off';
+    email.dataset.store = id;
+    email.dataset.field = 'email';
+    email.setAttribute('aria-label', `${def.name} email`);
+    const pass = document.createElement('input');
+    pass.type = 'password';
+    pass.placeholder = 'Password';
+    pass.autocomplete = 'new-password';
+    pass.dataset.store = id;
+    pass.dataset.field = 'password';
+    pass.setAttribute('aria-label', `${def.name} password`);
+    box.append(name, email, pass);
+  }
+}
+
+function fillVaultForm(data) {
+  for (const input of document.querySelectorAll('#vaultLogins input')) {
+    const login = (data.logins || {})[input.dataset.store] || {};
+    input.value = login[input.dataset.field] || '';
+  }
+  $('vaultCvv').value = data.cvv || '';
+}
+
+function readVaultForm() {
+  const data = PS5Vault.empty();
+  for (const input of document.querySelectorAll('#vaultLogins input')) {
+    const id = input.dataset.store;
+    data.logins[id] = data.logins[id] || { email: '', password: '' };
+    data.logins[id][input.dataset.field] = input.value.trim();
+  }
+  for (const id of Object.keys(data.logins)) if (!data.logins[id].email && !data.logins[id].password) delete data.logins[id];
+  data.cvv = $('vaultCvv').value.trim();
+  return data;
+}
+
+async function renderVault(msg) {
+  const [{ vault }, { vaultOpen }] = await Promise.all([chrome.storage.local.get('vault'), chrome.storage.session.get('vaultOpen')]);
+  const state = vaultOpen ? 'open' : vault ? 'locked' : 'none';
+  const pill = $('vaultStatus');
+  pill.textContent = { open: 'Unlocked', locked: 'Locked', none: 'Not set up' }[state];
+  pill.className = 'pill ' + { open: 'ok', locked: 'warn', none: 'neutral' }[state];
+  const editable = state !== 'locked';
+  for (const input of document.querySelectorAll('#vaultLogins input, #vaultCvv')) input.disabled = !editable;
+  $('vaultUnlock').hidden = state !== 'locked';
+  $('vaultSave').hidden = state === 'locked';
+  $('vaultLock').hidden = state !== 'open';
+  $('vaultPass').placeholder = state === 'none' ? 'Choose a passphrase (6+ characters)' : state === 'locked' ? 'Passphrase to unlock' : vaultPass ? 'Passphrase (remembered while this page is open)' : 'Passphrase, to save changes';
+  if (state === 'open') fillVaultForm(vaultOpen);
+  else if (state === 'locked') fillVaultForm(PS5Vault.empty());
+  else if (settings.cvv && !$('vaultCvv').value) $('vaultCvv').value = settings.cvv; // migrate the old plain-text CVV
+  if (msg !== undefined) $('vaultMsg').textContent = msg;
+  return state;
+}
+
+$('vaultUnlock').addEventListener('click', async () => {
+  const { vault } = await chrome.storage.local.get('vault');
+  try {
+    const data = await PS5Vault.open(vault, $('vaultPass').value);
+    vaultPass = $('vaultPass').value;
+    $('vaultPass').value = '';
+    await chrome.storage.session.set({ vaultOpen: data });
+    await renderVault('Unlocked until Chrome closes.');
+  } catch (e) {
+    await renderVault(e.message);
+  }
+});
+
+$('vaultSave').addEventListener('click', async () => {
+  const pass = $('vaultPass').value || vaultPass;
+  if (!pass) return renderVault('Enter your passphrase to save.');
+  try {
+    const { vault } = await chrome.storage.local.get('vault');
+    if (vault && !vaultPass) await PS5Vault.open(vault, pass); // make sure it's the same passphrase
+    const data = readVaultForm();
+    await chrome.storage.local.set({ vault: await PS5Vault.seal(data, pass) });
+    await chrome.storage.session.set({ vaultOpen: data });
+    if (settings.cvv) {
+      settings.cvv = ''; // now lives in the vault
+      await persist();
+    }
+    vaultPass = pass;
+    $('vaultPass').value = '';
+    await renderVault(`Saved ${Object.keys(data.logins).length} login(s)${data.cvv ? ' and your CVV' : ''}. Unlocked until Chrome closes.`);
+  } catch (e) {
+    await renderVault('Not saved: ' + e.message);
+  }
+});
+
+$('vaultLock').addEventListener('click', async () => {
+  await chrome.storage.session.remove('vaultOpen');
+  vaultPass = null;
+  await renderVault('Locked. Automatic sign-in and CVV are off until you unlock.');
+});
+
+$('checkSignins').addEventListener('click', async () => {
+  await send({ type: 'checkSignins' });
+  $('checkSignins').textContent = 'Checking… (tabs open and close by themselves)';
+  setTimeout(() => ($('checkSignins').textContent = 'Check sign-ins now'), 15000);
+});
+
+buildVaultRows();
+loadSettings().then(() => renderVault()).then(refresh);
 setInterval(refresh, 1000);

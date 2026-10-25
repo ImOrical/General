@@ -85,7 +85,105 @@
     return { ok: problems.length === 0, subtotal, problems };
   }
 
-  const api = { stepsFor, findSubtotal, isConfirmation, newFailures, isEmptyCart, productInOrder, finalGuard };
+  // ---------------------------------------------------------------- sign-in and CVV
+
+  const CVV_SELECTORS = [
+    'input[autocomplete="cc-csc"]',
+    'input[name*="cvv" i]',
+    'input[id*="cvv" i]',
+    'input[name*="cvc" i]',
+    'input[id*="cvc" i]',
+    'input[name*="securityCode" i]',
+    'input[id*="securityCode" i]',
+    'input[name*="security_code" i]',
+  ];
+  const EMAIL_SELECTORS = [
+    'input[type="email"]',
+    'input[autocomplete="username"]',
+    'input[autocomplete="email"]',
+    'input[name*="email" i]',
+    'input[id*="email" i]',
+    'input[name="username"]',
+    'input[id="username"]',
+    'input[name*="signinId" i]',
+  ];
+  const PASSWORD_SELECTORS = ['input[type="password"]'];
+  const OTP_SELECTORS = [
+    'input[autocomplete="one-time-code"]',
+    'input[name*="otp" i]',
+    'input[id*="otp" i]',
+    'input[name*="verificationCode" i]',
+    'input[name="code"]',
+  ];
+  const REMEMBER_SELECTORS = [
+    'input[type="checkbox"][name*="remember" i]',
+    'input[type="checkbox"][id*="remember" i]',
+    'input[type="checkbox"][name*="keep" i]',
+    'input[type="checkbox"][id*="keep" i]',
+    'input[type="checkbox"][name*="staySigned" i]',
+  ];
+  const SUBMIT_TEXT = '^(sign ?in|log ?in|continue|next|submit|sign in securely|sign in with (a |your )?password|use (a |your )?password)$';
+
+  function usable(el, live) {
+    if (!el || el.type === 'hidden' || el.disabled || el.readOnly) return false;
+    return !live || D.isVisible(el);
+  }
+
+  function pick(root, selectors, live) {
+    for (const sel of selectors) {
+      let els = [];
+      try {
+        els = root.querySelectorAll(sel);
+      } catch (_) {
+        continue;
+      }
+      for (const el of els) if (usable(el, live)) return el;
+    }
+    return null;
+  }
+
+  // CVV boxes on this page that are still empty.
+  function emptyCvvFields(doc, store, opts = {}) {
+    const fromSteps = ((store && store.checkout && store.checkout.steps) || []).flatMap((s) => s.cvv || []);
+    const out = [];
+    for (const sel of [...new Set([...fromSteps, ...CVV_SELECTORS])]) {
+      let els = [];
+      try {
+        els = doc.querySelectorAll(sel);
+      } catch (_) {
+        continue;
+      }
+      for (const el of els) if (usable(el, opts.live) && !el.value && !out.includes(el)) out.push(el);
+    }
+    return out;
+  }
+
+  // What a sign-in page wants next: 'otp' (a code we can't know), 'password',
+  // 'email' (email-first flows like Amazon's), or 'none' (not loaded yet).
+  function signInAction(doc, store, opts = {}) {
+    const si = (store && store.signin) || {};
+    const live = !!opts.live;
+    const text = D.textOf(doc.body, 20000);
+    const otp = pick(doc, OTP_SELECTORS, live) || (C.re(C.MATCH.otp).test(text) ? pick(doc, ['input[type="tel"]', 'input[inputmode="numeric"]', 'input[type="number"]', 'input[type="text"]'], live) : null);
+    if (otp) return { kind: 'otp', otp };
+    const password = pick(doc, [...(si.password || []), ...PASSWORD_SELECTORS], live);
+    const email = pick(doc, [...(si.email || []), ...EMAIL_SELECTORS], live);
+    if (!password && !email) return { kind: 'none' };
+    const form = (password || email).closest('form');
+    const spec = { selectors: si.submit || [], text: SUBMIT_TEXT };
+    const submit = (form && D.findClickable(form, spec, { live }).el) || D.findClickable(doc, spec, { live }).el;
+    // Styled checkboxes are often visually hidden, so don't require visibility.
+    const remember = pick(form || doc, REMEMBER_SELECTORS, false);
+    return { kind: password ? 'password' : 'email', email, password, submit, remember };
+  }
+
+  // A visible "Sign in" link on an ordinary page means the session has expired.
+  function signedOutLink(doc, store, opts = {}) {
+    const si = (store && store.signin) || {};
+    return D.findClickable(doc, { selectors: si.signedOutSelectors || [], text: si.signedOutText || C.MATCH.signedOut }, { live: !!opts.live }).el;
+  }
+
+  const api = { stepsFor, findSubtotal, isConfirmation, newFailures, isEmptyCart, productInOrder, finalGuard, emptyCvvFields, signInAction, signedOutLink, CVV_SELECTORS };
   root.PS5Flow = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

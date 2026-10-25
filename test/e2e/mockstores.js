@@ -24,7 +24,8 @@ const ADD_SCRIPT = (sel) => `
 
 const PLACE_SCRIPT = (sel, thanks) => `
   document.querySelector(${JSON.stringify(sel)}).addEventListener('click', async () => {
-    const cvv = document.getElementById('cvv');
+    const frame = document.querySelector('iframe');
+    const cvv = document.getElementById('cvv') || (frame && frame.contentDocument.querySelector('input'));
     const j = await (await fetch('/api/order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cvv: cvv ? cvv.value : null }) })).json();
     if (j.ok) location.href = ${JSON.stringify(thanks)};
     else document.getElementById('err').textContent = j.error;
@@ -43,9 +44,45 @@ function checkoutBody(st, placeButton) {
     ${st.cart.map((i) => `<div class="item">${i.name}</div>`).join('')}
     <div class="row"><span>Subtotal</span><span>$${subtotal(st).toFixed(2)}</span></div>
     <div class="row"><span>Estimated tax</span><span>$${(subtotal(st) * 0.08).toFixed(2)}</span></div>
-    ${st.requireCvv ? '<label>Security code <input id="cvv" name="cvv"></label>' : ''}
+    ${st.requireCvv && st.cvvInFrame ? '<iframe src="/payment/frame" title="Card" style="width:320px;height:60px;border:0"></iframe>' : ''}
+    ${st.requireCvv && !st.cvvInFrame ? '<label>Security code <input id="cvv" name="cvv"></label>' : ''}
     ${placeButton}<p id="err"></p>`;
 }
+
+// Best Buy style: email and password on one page. Target style: email first,
+// then the password box appears on the same page.
+function signinHtml(style, ret) {
+  const post = `async function login(remember) {
+      const j = await (await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: document.querySelector('input[type=email]').value, password: document.querySelector('input[type=password]').value, remember, ret: ${JSON.stringify(ret)} }) })).json();
+      if (j.ok) location.href = j.next; else document.getElementById('err').textContent = j.error;
+    }`;
+  if (style === 'single') {
+    return shell(
+      'Sign In - Best Buy',
+      `<form id="f"><h1>Sign In</h1><input type="email" id="fld-e" name="email"><input type="password" id="fld-p1" name="password">
+        <label><input type="checkbox" name="rememberMe"> Keep me signed in</label>
+        <button type="submit" class="cia-form__controls__submit">Sign In</button><p id="err"></p></form>`,
+      `${post}
+      document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault(); login(document.querySelector('[name=rememberMe]').checked); });`
+    );
+  }
+  return shell(
+    'Sign in : Target',
+    `<form id="f"><h1>Sign into your Target account</h1><input type="email" id="username">
+      <div id="pw" hidden><input type="password" id="password"><label><input type="checkbox" id="keepMeSignedIn"> Keep me signed in</label></div>
+      <button id="login" type="submit">Continue</button><p id="err"></p></form>`,
+    `${post}
+    document.getElementById('f').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const pw = document.getElementById('pw');
+      if (pw.hidden) { pw.hidden = false; document.getElementById('login').textContent = 'Sign in'; return; }
+      login(document.getElementById('keepMeSignedIn').checked);
+    });`
+  );
+}
+
+const OTP = shell('Verify', '<h1>Verify it\'s you</h1><p>Enter the verification code we sent to your phone.</p><input autocomplete="one-time-code" name="code"><button>Verify</button>');
 
 const CAPTCHA = shell('Robot Check', '<form action="/errors/validateCaptcha"><p>Type the characters you see in this image.</p><input name="field-keywords"></form>');
 
@@ -55,6 +92,9 @@ const STORES = {
   'www.bestbuy.com': {
     id: 'bestbuy',
     pdp: '/site/6601524.p',
+    signin: '/identity/signin',
+    signinStyle: 'single',
+    account: '/site/customer/myaccount',
     cart: '/cart',
     checkout: '/checkout/r/fast-track',
     thanks: '/checkout/r/thank-you',
@@ -76,6 +116,9 @@ const STORES = {
   'www.target.com': {
     id: 'target',
     pdp: '/p/playstation-5-pro-console/-/A-93620188',
+    signin: '/login',
+    signinStyle: 'email-first',
+    account: '/account',
     cart: '/cart',
     checkout: '/checkout',
     thanks: '/order-confirmation',
@@ -119,7 +162,23 @@ const STORES = {
 };
 
 function freshStoreState() {
-  return { inStock: false, price: 899.99, seller: null, cart: [], pleaseWaitMs: 0, waited: false, requireCvv: false, captchaAtCheckout: false, adds: 0, pdpHits: 0 };
+  return {
+    inStock: false,
+    price: 899.99,
+    seller: null,
+    cart: [],
+    pleaseWaitMs: 0,
+    waited: false,
+    requireCvv: false,
+    cvvInFrame: false,
+    captchaAtCheckout: false,
+    requireLogin: false,
+    otp: false,
+    creds: { email: 'me@example.com', password: 'hunter2!' },
+    logins: [],
+    adds: 0,
+    pdpHits: 0,
+  };
 }
 
 function createServer({ key, cert, port = 443 }) {
@@ -136,7 +195,14 @@ function createServer({ key, cert, port = 443 }) {
         res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store' });
         res.end(content);
       };
-      const json = (obj) => send(200, JSON.stringify(obj), 'application/json');
+      const json = (obj, headers = {}) => {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers });
+        res.end(JSON.stringify(obj));
+      };
+      const redirect = (to) => {
+        res.writeHead(302, { Location: to });
+        res.end();
+      };
 
       if (host === 'ntfy.sh') {
         state.ntfy.push({ topic: url.pathname.slice(1), title: req.headers.title || '', priority: req.headers.priority, body });
@@ -146,6 +212,24 @@ function createServer({ key, cert, port = 443 }) {
       if (!def) return send(404, 'unknown host');
       const st = state.stores[def.id];
       const p = url.pathname;
+      const authed = /(?:^|;\s*)auth=1/.test(req.headers.cookie || '');
+      const needsLogin = st.requireLogin && !authed;
+
+      if (def.signin && p === def.signin) return send(200, signinHtml(def.signinStyle, url.searchParams.get('return') || def.account));
+      if (p === '/identity/otp') return send(200, OTP);
+      if (p === '/api/login' && req.method === 'POST') {
+        const b = JSON.parse(body || '{}');
+        if (b.email !== st.creds.email || b.password !== st.creds.password) return json({ ok: false, error: 'Wrong email or password' });
+        st.logins.push({ email: b.email, remember: !!b.remember });
+        if (st.otp) return json({ ok: true, next: '/identity/otp' });
+        return json({ ok: true, next: b.ret || '/' }, { 'Set-Cookie': 'auth=1; Path=/; Secure; SameSite=Lax' });
+      }
+      if (def.account && p === def.account) {
+        if (needsLogin) return redirect(`${def.signin}?return=${encodeURIComponent(p)}`);
+        return send(200, shell('Account', '<header><a href="/account">Hi, Austin</a></header><h1>Your account</h1>'));
+      }
+      if (p === '/payment/frame') return send(200, shell('Card', '<label>Security code <input autocomplete="cc-csc" name="cvv"></label>'));
+      if (p === def.checkout && needsLogin) return redirect(`${def.signin}?return=${encodeURIComponent(p)}`);
 
       if (p === def.pdp) {
         st.pdpHits++;

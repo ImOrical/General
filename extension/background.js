@@ -16,10 +16,13 @@ const LEVEL = {
   blocked: 'high',
   stale: 'high',
   invite: 'high',
+  signin: 'high',
   info: 'low',
   heartbeat: 'low',
 };
 const STALL_MS = 30000;
+const REMIND_MS = 60000;
+const KEEPER_TIMEOUT_MS = 75000;
 
 let settings = C.resolveSettings({});
 let rt = freshRuntime();
@@ -43,6 +46,9 @@ function freshRuntime() {
     lock: null, // { storeId, tabId, at, clicked }
     placeClicks: {},
     attempts: {}, // storeId -> checkout start times, to stop runaway retry loops
+    signin: {}, // storeId -> { state: 'ok'|'auto'|'needs_you'|'timeout', at, reason }
+    signinAttempts: {}, // storeId -> password submissions, to avoid locking the account
+    lastKeeper: 0,
     alerted: {},
     lastFetchReload: {},
   };
@@ -93,6 +99,8 @@ async function alert(kind, title, body, opts = {}) {
   const level = LEVEL[kind] || 'default';
   addLog(kind, `${title}: ${body}`);
   const a = settings.alerts;
+  // Tapping a "needs you" alert can open remote access to this PC instead.
+  if ((kind === 'needs_you' || kind === 'signin') && a.needsYouLink) opts = { ...opts, url: a.needsYouLink };
   const jobs = [];
   if (a.desktop) jobs.push(desktopNotify(title, body, level, opts.tabId));
   if (a.siren && level === 'urgent') jobs.push(siren(kind === 'ordered' ? 6 : 15));
@@ -227,7 +235,10 @@ async function start() {
   if (blankTab) chrome.tabs.remove(blankTab.id).catch(() => {});
   ensureTicking();
   save();
-  alert('info', 'PS5 Pro watcher started', `Watching ${ids.map(storeName).join(', ')} in ${settings.mode} mode. Price cap $${settings.priceCap}.`);
+  rt.lastKeeper = 0; // check sign-ins on the next keepalive tick
+  const vault = await vaultState();
+  const locked = vault === 'locked' ? ' The vault is LOCKED, so automatic sign-in and CVV are off until you unlock it on the dashboard.' : '';
+  alert(locked ? 'signin' : 'info', 'PS5 Pro watcher started', `Watching ${ids.map(storeName).join(', ')} in ${settings.mode} mode. Price cap $${settings.priceCap}.${locked}`);
   return { ok: true };
 }
 
@@ -288,6 +299,12 @@ function tick() {
   }
 
   for (const [tabId, role] of Object.entries(rt.roles)) {
+    // Keep nagging (every minute, 5 times) while a checkout waits on you.
+    if (role.role === 'checkout' && role.waiting && role.waiting !== 'queue' && (role.reminders || 0) < 5 && now - (role.lastAlertAt || 0) > REMIND_MS) {
+      role.reminders = (role.reminders || 0) + 1;
+      role.lastAlertAt = now;
+      alert('needs_you', `${storeName(role.storeId)} still needs you (${role.reminders}/5)`, role.waiting, { tabId: +tabId, url: role.url });
+    }
     if (role.role !== 'checkout' || role.stallAlerted || role.waiting) continue;
     if (now - role.lastEvent > STALL_MS) {
       role.stallAlerted = true;
@@ -342,6 +359,7 @@ function roleFor(tabId) {
     role.lastEvent = Date.now();
     return checkoutCtx(role.storeId, role.practice);
   }
+  if (role.role === 'keeper') return { role: 'keeper', storeId: role.storeId, store: store(role.storeId) };
   return { role: 'none' };
 }
 
@@ -478,6 +496,8 @@ async function onCheckout(tabId, msg) {
 
     case 'needs_you':
       role.waiting = msg.reason;
+      role.lastAlertAt = Date.now();
+      role.reminders = 0;
       alert('needs_you', `${label}: needs you`, msg.reason, { key: `needs:${id}:${msg.reason}`, dedupeMs: 3 * 60000, tabId, url: msg.url });
       focusTab(tabId);
       break;
@@ -558,6 +578,96 @@ async function onCheckout(tabId, msg) {
   return {};
 }
 
+// ------------------------------------------------------------------ vault, sign-in, keeper
+
+async function openVault() {
+  return (await chrome.storage.session.get('vaultOpen')).vaultOpen || null;
+}
+
+// 'none' (never set up), 'locked' or 'open'.
+async function vaultState() {
+  if (await openVault()) return 'open';
+  return (await chrome.storage.local.get('vault')).vault ? 'locked' : 'none';
+}
+
+async function signinCredentials(tabId, kind) {
+  const role = rt.roles[tabId];
+  if (!role || (role.role !== 'checkout' && role.role !== 'keeper')) return { error: 'not one of our tabs' };
+  const id = role.storeId;
+  const v = await openVault();
+  if (!v) return { error: (await vaultState()) === 'locked' ? 'the vault is locked; unlock it on the dashboard' : 'no login saved; add it on the dashboard' };
+  const login = v.logins && v.logins[id];
+  if (!login || !login.email || !login.password) return { error: `no ${storeName(id)} login saved in the vault` };
+  if (kind === 'password') {
+    // Too many wrong passwords can lock the account; stop at 3 an hour.
+    const recent = (rt.signinAttempts[id] || []).filter((t) => Date.now() - t < 3600000);
+    if (recent.length >= 3) return { error: 'tried 3 times this hour; check the saved password' };
+    rt.signinAttempts[id] = recent.concat(Date.now());
+    role.signedInAuto = true;
+    addLog('step', `${storeName(id)}: signing in automatically`);
+    save();
+  }
+  return { email: login.email, password: login.password };
+}
+
+const keeperWaiters = {}; // tabId -> resolve
+let keeperRunning = false;
+
+// Visits each store's account page in turn; signs in if the session expired.
+async function runKeeper() {
+  if (keeperRunning) return;
+  if (Object.values(rt.roles).some((r) => r.role === 'checkout' && !r.practice)) return; // never during a checkout
+  keeperRunning = true;
+  rt.lastKeeper = Date.now();
+  try {
+    for (const id of Object.keys(C.STORES).filter((i) => settings.stores[i] && settings.stores[i].enabled)) {
+      const url = store(id).accountUrl;
+      if (url) await keeperCheck(id, url);
+    }
+  } finally {
+    keeperRunning = false;
+    save();
+  }
+}
+
+async function keeperCheck(id, url) {
+  let tabId;
+  try {
+    const opts = { url: 'about:blank', active: false };
+    if (rt.running && rt.windowId != null) opts.windowId = rt.windowId;
+    const tab = await chrome.tabs.create(opts);
+    tabId = tab.id;
+    rt.roles[tabId] = { role: 'keeper', storeId: id, startedAt: Date.now() };
+    await chrome.tabs.update(tabId, { url, autoDiscardable: false });
+  } catch (e) {
+    addLog('error', `sign-in check for ${storeName(id)} failed to open: ${e}`);
+    return;
+  }
+  const result = await new Promise((resolve) => {
+    keeperWaiters[tabId] = resolve;
+    setTimeout(() => resolve({ result: 'timeout' }), KEEPER_TIMEOUT_MS);
+  });
+  delete keeperWaiters[tabId];
+  const role = rt.roles[tabId] || {};
+  const state = result.result === 'ok' ? (role.signedInAuto ? 'auto' : 'ok') : result.result;
+  rt.signin[id] = { state, at: Date.now(), reason: result.reason || '' };
+  addLog(state === 'ok' || state === 'auto' ? 'info' : 'signin', `${storeName(id)} sign-in check: ${state}${result.reason ? ' (' + result.reason + ')' : ''}`);
+  if (state === 'ok' || state === 'auto' || state === 'timeout') {
+    delete rt.roles[tabId];
+    chrome.tabs.remove(tabId).catch(() => {});
+  } else {
+    // Leave the tab open so you can sign in there.
+    rt.roles[tabId] = { role: 'none', storeId: id };
+    alert('signin', `Sign in to ${storeName(id)} now`, `${result.reason || 'You were signed out'}. Do it before a drop so checkout doesn't stop there.`, { key: 'keeper:' + id, dedupeMs: 3 * 3600000, tabId });
+  }
+}
+
+function onKeeper(tabId, msg) {
+  const resolve = keeperWaiters[tabId];
+  if (resolve) resolve(msg);
+  return {};
+}
+
 // ------------------------------------------------------------------ dashboard actions
 
 async function practice(storeId, url) {
@@ -582,8 +692,19 @@ async function handle(msg, sender) {
       return tabId != null ? onCheckout(tabId, msg) : {};
     case 'cvv': {
       const role = rt.roles[tabId];
-      return role && role.role === 'checkout' && !role.practice ? { cvv: settings.cvv || '' } : {};
+      if (!role || role.role !== 'checkout') return { error: 'not a checkout tab' };
+      const v = await openVault();
+      const cvv = (v && v.cvv) || settings.cvv || '';
+      if (cvv) return { cvv };
+      return { error: (await vaultState()) === 'locked' ? 'the vault is locked' : 'no CVV is saved' };
     }
+    case 'signin':
+      return tabId != null ? signinCredentials(tabId, msg.kind) : {};
+    case 'keeper':
+      return tabId != null ? onKeeper(tabId, msg) : {};
+    case 'checkSignins':
+      runKeeper();
+      return { ok: true };
     case 'start':
       return start();
     case 'stop':
@@ -653,7 +774,10 @@ chrome.alarms.create('keepalive', { periodInMinutes: 0.5 });
 chrome.alarms.create('heartbeat', { periodInMinutes: 360 });
 chrome.alarms.onAlarm.addListener((a) => {
   ready.then(() => {
-    if (a.name === 'keepalive' && rt.running) ensureTicking();
+    if (a.name === 'keepalive' && rt.running) {
+      ensureTicking();
+      if (settings.keeperHours > 0 && Date.now() - rt.lastKeeper > settings.keeperHours * 3600000) runKeeper();
+    }
     if (a.name === 'heartbeat' && rt.running) {
       const parts = Object.keys(rt.watchers).map((id) => `${storeName(id)}: ${(rt.status[id] && rt.status[id].state) || 'no data'}`);
       alert('heartbeat', 'PS5 Pro watcher is running', `${settings.mode} mode. ${parts.join(', ')}`);
@@ -662,3 +786,10 @@ chrome.alarms.onAlarm.addListener((a) => {
 });
 
 chrome.action.onClicked.addListener(() => chrome.runtime.openOptionsPage());
+
+// Chrome restarted (e.g. after a Windows update): pick up where we left off.
+chrome.runtime.onStartup.addListener(() => {
+  ready.then(() => {
+    if (settings.autoStart && !purchased) start();
+  });
+});

@@ -10,7 +10,9 @@
     "https://my.account.sony.com/*",
     "https://www.bestbuy.com/*",
     "https://www.target.com/*",
+    "https://login.target.com/*",
     "https://www.walmart.com/*",
+    "https://identity.walmart.com/*",
     "https://www.amazon.com/*",
     "https://www.gamestop.com/*",
     "https://*.queue-it.net/*",
@@ -26,13 +28,16 @@
         "https://my.account.sony.com/*",
         "https://www.bestbuy.com/*",
         "https://www.target.com/*",
+        "https://login.target.com/*",
         "https://www.walmart.com/*",
+        "https://identity.walmart.com/*",
         "https://www.amazon.com/*",
         "https://www.gamestop.com/*",
         "https://*.queue-it.net/*"
       ],
       "js": ["lib/config.js", "lib/detect.js", "lib/flow.js", "content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ],
   "options_page": "dashboard.html",
