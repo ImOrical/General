@@ -92,10 +92,10 @@ test('hot windows: evaluated in Eastern time', () => {
 });
 
 test('outside alerts: picks out the store, ignores other products', () => {
-  assert.deepEqual(FL.parseTrigger('🚨 PS5 Pro in stock at Best Buy! $899.99'), { matched: true, stores: ['bestbuy'] });
+  assert.deepEqual(FL.parseTrigger('🚨 PS5 Pro in stock at Best Buy! $899.99'), { matched: true, stores: ['bestbuy'], links: [] });
   assert.deepEqual(FL.parseTrigger('PlayStation 5 Pro Console restock: Target and Walmart').stores, ['target', 'walmart']);
   assert.deepEqual(FL.parseTrigger('PlayStation®5 Pro live on PlayStation Direct').stores, ['psdirect']);
-  assert.deepEqual(FL.parseTrigger('PS5 Pro restock!'), { matched: true, stores: [] });
+  assert.deepEqual(FL.parseTrigger('PS5 Pro restock!'), { matched: true, stores: [], links: [] });
   assert.equal(FL.parseTrigger('PS5 Slim in stock at Target').matched, false);
   assert.equal(FL.parseTrigger('Xbox at GameStop', { anyProduct: true }).matched, true);
 });
@@ -106,4 +106,15 @@ test('several listings per store', () => {
   assert.equal(C.resolveStore('bestbuy', s).productUrl, 'https://www.bestbuy.com/site/1.p?skuId=1');
   assert.deepEqual(C.watchUrls('target', s), [C.STORES.target.productUrl], 'blank falls back to the built-in link');
   assert.deepEqual(C.watchUrls('amazon', s), [], 'no built-in Amazon link');
+});
+
+test('alerts: product links pick the store and are opened; other links are ignored', () => {
+  const t = FL.parseTrigger('PS5 Pro restock', {}, [
+    'https://www.bestbuy.com/site/6609999.p?skuId=6609999',
+    'https://www.bestbuy.com/', // a homepage, not a listing
+    'https://howl.me/abc123', // a shortened link we can't tell anything about
+  ]);
+  assert.deepEqual(t.stores, ['bestbuy']);
+  assert.deepEqual(t.links, [{ storeId: 'bestbuy', url: 'https://www.bestbuy.com/site/6609999.p?skuId=6609999' }]);
+  assert.equal(FL.parseTrigger('Xbox restock', {}, ['https://www.bestbuy.com/site/1.p?skuId=1']).matched, false);
 });

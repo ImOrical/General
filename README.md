@@ -54,7 +54,25 @@ If something looks off, for example in stock but the seller can't be confirmed, 
 
 Keep **HotStock** running on your phone as a second safety net.
 
-## How fast it is
+## How it finds stock
+
+**Restock alerts (the default, and recommended).** Restock trackers and their Discord servers do the spotting. The extension reads new posts in a Discord channel (or alerts sent to an ntfy topic). When a post about a PS5 Pro names a store, it loads that store's page immediately and buys if the page passes every check. It keeps reloading that store every few seconds for a couple of minutes, in case the page lags behind the alert. If the post links a specific listing, it opens that too. Between alerts it only loads each store page once every 5 minutes as a safety net. Stores see very little traffic from you, so you see far fewer CAPTCHAs, and your session isn't flagged at the moment you're trying to check out.
+
+In testing, Discord post to placed order took **1.8 seconds**.
+
+### Set up Discord (5 minutes)
+
+1. Join a restock server in Discord. [TrackaLacker](https://www.trackalacker.com/articles/news/find-ps5-pro-in-stock) runs a free one with a console channel, and StockMaid has a #ps5-pro channel.
+2. In **Chrome on your Mac**, go to https://discord.com/app, sign in, and open the server's PS5 / console restock channel.
+3. Copy the link from Chrome's address bar. It looks like `https://discord.com/channels/123…/456…`.
+4. On the dashboard, under **Alerts → Discord restock channels**, paste the link, then click **Save settings**. Add more channels on separate lines.
+5. Click **Start**. The channel opens as a pinned tab in the watcher window. If Discord asks you to sign in there, do it once.
+
+The extension only reads new posts in that tab. It never posts, reacts or clicks anything in Discord. Posts that aren't about a PS5 Pro are ignored, and so are old posts already in the channel. A post never buys anything by itself: the real store page still has to show a new PS5 Pro, sold by the store, at or under your max price.
+
+**Alerts + its own checks.** Choose this under **How it finds stock** on the dashboard if you'd rather the extension also check every store itself. It catches drops the alerts miss, but checks every few seconds, which makes stores show more CAPTCHAs. The layers below describe that mode.
+
+## How fast its own checks are (alerts + its own checks mode)
 
 Four layers, fastest first.
 

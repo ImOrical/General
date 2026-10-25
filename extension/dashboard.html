@@ -63,7 +63,11 @@
         <label>Ignore prices under <input id="minPrice" type="number" step="1" min="0"></label>
         <label class="check"><input id="autoStart" type="checkbox"> Start watching automatically when Chrome opens</label>
         <label>Check sign-ins every (hours, 0 = never) <input id="keeperHours" type="number" min="0" step="1"></label>
-        <h3>Speed</h3>
+        <h3>How it finds stock</h3>
+        <label class="check"><input type="radio" name="detection" value="alerts"> <span><b>Restock alerts</b> (recommended): Discord and outside alerts spot the stock; stores are only loaded every few minutes as a safety net. Fewest CAPTCHAs.</span></label>
+        <label class="check"><input type="radio" name="detection" value="both"> <span><b>Alerts + its own checks</b>: also checks every store every few seconds. Catches drops alerts miss, but stores see much more traffic and show more CAPTCHAs.</span></label>
+        <label>Safety-net page load every (seconds) <input id="safetyReloadSec" type="number" min="30" step="10"></label>
+        <h3>Speed (alerts + its own checks)</h3>
         <label>Store stock request every (seconds) <input id="apiIntervalSec" type="number" min="0" step="0.5"></label>
         <label>Page quick check every (seconds) <input id="fetchIntervalSec" type="number" min="0" step="0.5"></label>
         <label>Full page reload every (seconds) <input id="reloadIntervalSec" type="number" min="5" step="1"></label>
@@ -84,7 +88,11 @@
         <label>Discord webhook URL <input id="discordWebhook" type="url" spellcheck="false"></label>
         <label>"Needs you" alerts open <input id="needsYouLink" type="url" spellcheck="false" placeholder="https://remotedesktop.google.com/access"></label>
         <p class="help">Set this to Chrome Remote Desktop and tapping a CAPTCHA or code alert on your phone opens this PC, so you can solve it from anywhere in seconds.</p>
-        <h3>Outside alerts (makes it faster)</h3>
+        <h3>Discord restock channels</h3>
+        <label>Channel links, one per line <textarea id="discordChannels" rows="3" spellcheck="false" placeholder="https://discord.com/channels/123456789/987654321"></textarea></label>
+        <p class="help">Open the restock server's PS5 channel in Chrome, copy the address bar link, and paste it here. At Start it opens in the watcher window; sign in to Discord there once. It only reads new posts. <span id="discordStatus"></span></p>
+        <label class="check"><input id="openLinks" type="checkbox"> Also open product links from posts (still checks it's a new PS5 Pro, sold by the store, under your max)</label>
+        <h3>Outside alerts (ntfy)</h3>
         <label>Listen on ntfy topic <span class="row"><input id="triggerTopic" type="text" spellcheck="false"><button id="genTrigger" class="small">Generate</button></span></label>
         <p class="help">Anything posted to this topic, like a forwarded HotStock alert ("PS5 Pro in stock at Target"), makes it check that store immediately and go hot. It never buys from an alert alone. Use a different topic from the one above. <span id="triggerStatus"></span></p>
         <label class="check"><input id="triggerAny" type="checkbox"> React even if the alert doesn't mention "PS5 Pro"</label>

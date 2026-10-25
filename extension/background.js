@@ -56,6 +56,10 @@ function freshRuntime() {
     quickOff: {}, // watch key -> reloads only (store refuses quick checks) until this time
     lastTrigger: {}, // storeId -> last outside alert handled
     triggerConnected: false,
+    discordTabs: {}, // channel url -> tabId
+    discord: {}, // channel url -> { signedIn, hasMessages, at }
+    lastAlert: null, // { at, source, text }
+    probes: {}, // storeId -> when a listing linked in an alert was last opened
     backoff: {}, // storeId -> { level, until, fetchLevel, fetchUntil }
     paused: {}, // storeId -> 'queue' | 'checkout'
     lock: null, // { storeId, tabId, at, clicked }
@@ -268,8 +272,13 @@ async function start() {
     rt.watchers[w.key] = tabId;
     rt.watches[w.key] = { storeId: w.storeId, url: w.url };
     // Stagger listings so their checks don't all land in the same second.
-    next[w.key] = { fetch: now + 2000 + i * 300, reload: now + jitter(settings.reloadIntervalSec * 1000) + i * 1500 };
+    const firstReloadSec = alertsMode() ? settings.safetyReloadSec : settings.reloadIntervalSec;
+    next[w.key] = { fetch: now + 2000 + i * 300, reload: now + jitter(firstReloadSec * 1000) + i * 1500 };
   }
+  rt.discordTabs = {};
+  rt.discord = {};
+  rt.probes = {};
+  for (const url of discordChannels()) await openDiscord(url);
   if (blankTab) chrome.tabs.remove(blankTab.id).catch(() => {});
   ensureTicking();
   startTriggerStream();
@@ -341,7 +350,10 @@ function goHot(stores, minutes, reason) {
   // Pull the next quick checks in so the faster pace starts now.
   for (const key of Object.keys(rt.watchers)) {
     const w = rt.watches[key];
-    if (w && ids.includes(w.storeId) && next[key]) next[key].fetch = Math.min(next[key].fetch, now + 250);
+    if (w && ids.includes(w.storeId) && next[key]) {
+      next[key].fetch = Math.min(next[key].fetch, now + 250);
+      if (alertsMode()) next[key].reload = Math.min(next[key].reload, now + settings.burstReloadSec * 1000);
+    }
   }
 }
 
@@ -352,8 +364,20 @@ function checkNow(storeId) {
     const role = rt.roles[tabId];
     if (!role || role.role !== 'watch' || rt.paused[storeId]) continue;
     reloadTab(tabId);
-    if (next[key]) next[key].reload = Date.now() + jitter(settings.reloadIntervalSec * 1000);
+    const sec = settings.detection === 'alerts' ? settings.burstReloadSec : settings.reloadIntervalSec;
+    if (next[key]) next[key].reload = Date.now() + jitter(sec * 1000);
   }
+}
+
+function alertsMode() {
+  return settings.detection === 'alerts';
+}
+
+// Hot mode across every store, except in alerts mode: there one store's drop
+// shouldn't send every store into a burst of page loads.
+function goHotEverywhere(storeId, reason) {
+  if (alertsMode()) goHot([storeId], settings.burstMinutes, reason);
+  else goHot(null, settings.hotMinutes, reason);
 }
 
 function tick() {
@@ -365,15 +389,22 @@ function tick() {
     const role = rt.roles[tabId];
     const id = role && role.storeId;
     if (!role || role.role !== 'watch' || rt.paused[id]) continue;
-    const { mode, factor } = speedMode(id, now, warm);
+    let { mode, factor } = speedMode(id, now, warm);
     const st = rt.status[key] || {};
     const apiLane = st.lane === 'learned' || st.lane === 'template';
     const baseSec = apiLane ? settings.apiIntervalSec : settings.fetchIntervalSec;
     // If the store refuses quick checks, watch that listing by reloading the page more often instead.
     const quickOff = (rt.quickOff[key] || 0) > now;
-    const quickMs = baseSec > 0 && !quickOff ? Math.max(1000, baseSec * 1000 * factor) : 0;
+    let quickMs = baseSec > 0 && !quickOff ? Math.max(1000, baseSec * 1000 * factor) : 0;
     const reloadSec = quickOff ? Math.min(settings.reloadIntervalSec, settings.reloadOnlySec) : settings.reloadIntervalSec;
-    const reloadMs = Math.max(5000, reloadSec * 1000 * factor);
+    let reloadMs = Math.max(5000, reloadSec * 1000 * factor);
+    if (alertsMode()) {
+      // Alerts do the spotting: a slow safety-net reload, and a short burst of
+      // reloads after an alert about this store.
+      quickMs = 0;
+      mode = mode === 'hot' ? 'burst' : 'alerts';
+      reloadMs = Math.max(5000, (mode === 'burst' ? settings.burstReloadSec : settings.safetyReloadSec) * 1000);
+    }
     rt.speed[key] = { quickMs, reloadMs, mode, quickOff };
     const n = next[key] || (next[key] = { fetch: now + jitter(quickMs || 4000), reload: now + jitter(reloadMs) });
     const bo = rt.backoff[id] || {};
@@ -466,6 +497,7 @@ function roleFor(tabId) {
     return checkoutCtx(role.storeId, role.practice, role);
   }
   if (role.role === 'keeper') return { role: 'keeper', storeId: role.storeId, store: store(role.storeId) };
+  if (role.role === 'discord') return { role: 'discord' };
   return { role: 'none' };
 }
 
@@ -524,7 +556,7 @@ function onStatus(tabId, result) {
   if (result.state === 'queue') {
     if (rt.paused[id] !== 'queue') {
       rt.paused[id] = 'queue';
-      goHot(null, settings.hotMinutes, `${name} opened a queue`);
+      goHotEverywhere(id, `${name} opened a queue`);
       alert('queue', `${name} queue is open`, `A waiting room just appeared at ${name}, which usually means a drop. Holding your place; don't close the tab.`, { key: 'queue:' + id, dedupeMs: 10 * 60000, tabId, url: productUrl });
     }
     return { go: false };
@@ -549,11 +581,12 @@ function onStatus(tabId, result) {
     }
   }
   if (result.state !== 'in_stock') return { go: false };
+  if (role.oneShot && quick) return { go: false };
 
   if (quick) {
     // The quick check thinks it's in stock: reload now to confirm on the real page.
     rt.apiIn[key] = now;
-    goHot(null, settings.hotMinutes, `${name} quick check saw stock`);
+    goHotEverywhere(id, `${name} quick check saw stock`);
     if (!rt.lastFetchReload[key] || now - rt.lastFetchReload[key] > 10000) {
       rt.lastFetchReload[key] = now;
       next[key] = Object.assign(next[key] || {}, { reload: now + jitter(settings.reloadIntervalSec * 1000) });
@@ -574,7 +607,7 @@ function onStatus(tabId, result) {
     return { go: false };
   }
   if (purchased) return { go: false };
-  goHot(null, settings.hotMinutes, `${name} is in stock`);
+  goHotEverywhere(id, `${name} is in stock`);
 
   const price = result.price != null ? `$${result.price.toFixed(2)}` : '';
   const buying = settings.mode === 'armed' ? 'Buying now.' : settings.mode === 'dryrun' ? 'Dry run: going to Place Order but not clicking it.' : 'Go buy it!';
@@ -604,6 +637,14 @@ function onStatus(tabId, result) {
 
 async function backToWatching(tabId, role) {
   const key = role.key || role.storeId;
+  if (String(key).startsWith('probe:')) {
+    // A listing opened from an alert link: done with it.
+    delete rt.roles[tabId];
+    delete rt.watchers[key];
+    delete rt.watches[key];
+    chrome.tabs.remove(tabId).catch(() => {});
+    return;
+  }
   if (role.practice || !rt.running || rt.watchers[key] !== tabId) {
     delete rt.roles[tabId];
     return;
@@ -616,6 +657,7 @@ async function backToWatching(tabId, role) {
 
 // The dry-run tab stays open for you to finish by hand, so open a fresh watcher.
 async function replaceWatcher(key) {
+  if (String(key).startsWith('probe:')) return;
   const w = rt.watches[key];
   if (!rt.running || rt.windowId == null || !w) return;
   try {
@@ -796,19 +838,86 @@ function onTriggerLine(line) {
   }
   if (msg.event !== 'message') return;
   const text = [msg.title, msg.message].filter(Boolean).join(' ');
-  const t = FL.parseTrigger(text, { anyProduct: settings.trigger.anyProduct });
+  const links = (text.match(/https?:\/\/\S+/g) || []).map((u) => u.replace(/[)\].,!]+$/, ''));
+  onAlert(text, links, 'Outside');
+}
+
+// A restock post from Discord or an outside alert: check the stores it names
+// right now, and open any product link it carries. Never buys by itself; the
+// usual checks on the real store page decide.
+function onAlert(text, links, source) {
+  const t = FL.parseTrigger(text, { anyProduct: settings.trigger.anyProduct }, links || []);
   if (!t.matched) {
-    addLog('trigger', `Ignored an outside alert that isn't about a PS5 Pro: "${text.slice(0, 80)}"`);
+    // Restock channels post about lots of products; only log ignored ntfy alerts.
+    if (source === 'Outside') addLog('trigger', `Ignored an outside alert that isn't about a PS5 Pro: "${text.slice(0, 80)}"`);
     return;
   }
   const now = Date.now();
-  const ids = (t.stores.length ? t.stores : enabledStores()).filter((id) => keysFor(id).length && now - (rt.lastTrigger[id] || 0) > 5000);
-  if (!ids.length) return;
+  const enabled = enabledStores();
+  rt.lastAlert = { at: now, source, text: text.slice(0, 140) };
+  const ids = (t.stores.length ? t.stores : enabled).filter((id) => enabled.includes(id) && now - (rt.lastTrigger[id] || 0) > 5000);
   for (const id of ids) rt.lastTrigger[id] = now;
-  goHot(ids, settings.hotMinutes, 'outside alert');
-  for (const id of ids) checkNow(id);
-  addLog('trigger', `Outside alert, checking ${ids.map(storeName).join(', ')} now: "${text.slice(0, 100)}"`);
+  if (ids.length) {
+    goHot(ids, alertsMode() ? settings.burstMinutes : settings.hotMinutes, `${source} alert`);
+    for (const id of ids) checkNow(id);
+  }
+  const opened = [];
+  if (settings.discord.openLinks) {
+    for (const l of t.links) if (enabled.includes(l.storeId) && !isWatched(l.storeId, l.url) && probe(l.storeId, l.url)) opened.push(storeName(l.storeId));
+  }
+  if (!ids.length && !opened.length) return;
+  addLog('trigger', `${source} alert, checking ${ids.map(storeName).join(', ') || 'linked listing'} now${opened.length ? ` (opened the linked ${opened.join(', ')} listing)` : ''}: "${text.slice(0, 100)}"`);
   save();
+}
+
+function isWatched(storeId, url) {
+  const pid = FL.productId(store(storeId), url);
+  return Object.values(rt.watches).some((w) => w.storeId === storeId && (pid ? FL.productId(store(storeId), w.url) === pid : w.url.split('?')[0] === url.split('?')[0]));
+}
+
+// Opens a listing linked in an alert as a temporary watch for 90 seconds, so
+// the normal checks (PS5 Pro, new, sold by the store, under the cap) run on it.
+function probe(storeId, url) {
+  const now = Date.now();
+  if (!rt.running || rt.windowId == null || rt.paused[storeId] === 'checkout') return false;
+  if (now - (rt.probes[storeId] || 0) < 30000) return false;
+  rt.probes[storeId] = now;
+  const key = `probe:${storeId}`;
+  (async () => {
+    try {
+      const tabId = await openRoleTab(rt.windowId, url, { role: 'watch', storeId, key, url, oneShot: true, lastReport: Date.now() });
+      rt.watchers[key] = tabId;
+      rt.watches[key] = { storeId, url };
+      next[key] = { fetch: Date.now() + 60000, reload: Date.now() + settings.burstReloadSec * 1000 };
+      setTimeout(() => {
+        const role = rt.roles[tabId];
+        if (role && role.oneShot && role.role === 'watch') chrome.tabs.remove(tabId).catch(() => {});
+      }, 90000);
+    } catch (_) {
+      // Watcher window gone.
+    }
+  })();
+  return true;
+}
+
+// ------------------------------------------------------------------ Discord
+
+function discordChannels() {
+  return String((settings.discord && settings.discord.channels) || '')
+    .split(/\s+/)
+    .filter((u) => /^https:\/\/(www\.)?discord\.com\/channels\//i.test(u));
+}
+
+async function openDiscord(url) {
+  if (!rt.running || rt.windowId == null) return;
+  try {
+    const tab = await chrome.tabs.create({ windowId: rt.windowId, url: 'about:blank', active: false, index: 0 });
+    rt.roles[tab.id] = { role: 'discord', url };
+    rt.discordTabs[url] = tab.id;
+    await chrome.tabs.update(tab.id, { url, autoDiscardable: false, pinned: true });
+  } catch (e) {
+    addLog('error', 'could not open the Discord channel: ' + e);
+  }
 }
 
 // ------------------------------------------------------------------ vault, sign-in, keeper
@@ -935,6 +1044,23 @@ async function handle(msg, sender) {
       return tabId != null ? signinCredentials(tabId, msg.kind) : {};
     case 'keeper':
       return tabId != null ? onKeeper(tabId, msg) : {};
+    case 'discordAlert': {
+      const role = rt.roles[tabId];
+      if (role && role.role === 'discord' && rt.running) onAlert(String(msg.text || ''), msg.links || [], 'Discord');
+      return {};
+    }
+    case 'discordReady': {
+      const role = rt.roles[tabId];
+      if (role && role.role === 'discord') {
+        const before = rt.discord[role.url];
+        rt.discord[role.url] = { signedIn: !!msg.signedIn, hasMessages: !!msg.hasMessages, at: Date.now() };
+        if (!msg.signedIn && (!before || before.signedIn)) {
+          alert('needs_you', 'Sign in to Discord', 'The Discord channel in the watcher window needs you to sign in once, so restock posts can be read.', { key: 'discord-signin', dedupeMs: 3600000, tabId });
+        }
+        save();
+      }
+      return {};
+    }
     case 'checkSignins':
       runKeeper();
       return { ok: true };
@@ -994,7 +1120,16 @@ chrome.tabs.onRemoved.addListener((tabId, info) => {
     delete rt.roles[tabId];
     if (rt.lock && rt.lock.tabId === tabId && !rt.lock.clicked) rt.lock = null;
     const key = role && (role.key || role.storeId);
-    if (role && rt.running && !info.isWindowClosing && rt.watchers[key] === tabId) {
+    if (role && role.role === 'discord' && rt.running && !info.isWindowClosing) {
+      addLog('info', 'Discord tab was closed; reopening it');
+      openDiscord(role.url);
+    }
+    if (role && (role.oneShot || String(key).startsWith('probe:'))) {
+      if (rt.watchers[key] === tabId) {
+        delete rt.watchers[key];
+        delete rt.watches[key];
+      }
+    } else if (role && rt.running && !info.isWindowClosing && rt.watchers[key] === tabId) {
       addLog('info', `${storeName(role.storeId)} watcher tab was closed; reopening it`);
       replaceWatcher(key);
     }

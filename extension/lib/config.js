@@ -231,6 +231,19 @@
     // Below this, the "PS5 Pro" we matched is probably an accessory or a pricing glitch:
     // alert, but don't auto-buy.
     minPrice: 600,
+    // How it finds stock:
+    //   'alerts' - restock alerts (Discord, ntfy) do the spotting; the stores are
+    //              only loaded every few minutes as a safety net, and checked
+    //              quickly for a short burst after an alert. Fewest CAPTCHAs.
+    //   'both'   - alerts plus its own frequent checks below. Faster on its own,
+    //              but the stores see far more traffic and show more CAPTCHAs.
+    detection: 'alerts',
+    safetyReloadSec: 300,
+    burstReloadSec: 8,
+    burstMinutes: 2,
+    // Discord channel links to watch for restock posts (one per line), and
+    // whether to open product links found in those posts.
+    discord: { channels: '', openLinks: true },
     // Seconds between checks per listing: the store's small stock request
     // (when one was found) and the whole product page.
     apiIntervalSec: 2.5,

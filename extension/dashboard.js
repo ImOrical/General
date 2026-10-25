@@ -27,6 +27,10 @@ async function loadSettings() {
   settings = C.resolveSettings(saved);
   for (const k of ['priceCap', 'minPrice', 'apiIntervalSec', 'fetchIntervalSec', 'reloadIntervalSec', 'jitterPct', 'keeperHours', 'hotMinutes', 'hotWindows']) $(k).value = settings[k];
   $('triggerTopic').value = settings.trigger.ntfyTopic || '';
+  $('safetyReloadSec').value = settings.safetyReloadSec;
+  $('discordChannels').value = settings.discord.channels || '';
+  $('openLinks').checked = !!settings.discord.openLinks;
+  for (const r of document.querySelectorAll('input[name="detection"]')) r.checked = r.value === settings.detection;
   $('triggerAny').checked = !!settings.trigger.anyProduct;
   $('autoStart').checked = !!settings.autoStart;
   for (const k of ALERT_FIELDS) $(k).value = settings.alerts[k] || '';
@@ -78,6 +82,10 @@ function readForm() {
   settings.hotMinutes = Math.max(1, num('hotMinutes'));
   settings.hotWindows = $('hotWindows').value.trim();
   settings.trigger = { ntfyTopic: $('triggerTopic').value.trim(), anyProduct: $('triggerAny').checked };
+  settings.safetyReloadSec = Math.max(30, num('safetyReloadSec'));
+  settings.discord = { channels: $('discordChannels').value.trim(), openLinks: $('openLinks').checked };
+  const det = document.querySelector('input[name="detection"]:checked');
+  if (det) settings.detection = det.value;
   settings.reloadIntervalSec = Math.max(5, num('reloadIntervalSec'));
   settings.jitterPct = Math.min(80, Math.max(0, num('jitterPct')));
   settings.autoStart = $('autoStart').checked;
@@ -125,7 +133,7 @@ function renderSpeed(rt) {
   const modes = Object.values(rt.speed || {}).map((s) => s.mode);
   if (rt.running && hotUntil > now) {
     const left = Math.ceil((hotUntil - now) / 1000);
-    pill.textContent = `HOT ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+    pill.textContent = `${settings.detection === 'alerts' ? 'CHECKING' : 'HOT'} ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
     pill.className = 'pill bad';
     pill.title = rt.hot.reason ? 'Checking faster because: ' + rt.hot.reason : '';
   } else if (rt.running && modes.includes('warm')) {
@@ -133,11 +141,17 @@ function renderSpeed(rt) {
     pill.className = 'pill warn';
     pill.title = 'Inside a hot window: checking a bit faster';
   } else {
-    pill.textContent = rt.running ? 'Normal speed' : 'Stopped';
+    pill.textContent = !rt.running ? 'Stopped' : settings.detection === 'alerts' ? 'Waiting for alerts' : 'Normal speed';
     pill.className = 'pill neutral';
     pill.title = '';
   }
   $('goHot').textContent = hotUntil > now ? 'Cool down' : 'Go hot 30 min';
+  const d = $('discordStatus');
+  if (d) {
+    const chans = Object.values(rt.discord || {});
+    const last = rt.lastAlert ? ` Last PS5 Pro alert ${ago(rt.lastAlert.at)} (${rt.lastAlert.source}).` : '';
+    d.textContent = !settings.discord.channels ? '' : !rt.running ? 'Opens when you press Start.' : !chans.length ? 'Opening…' : chans.some((c) => !c.signedIn) ? 'Sign in to Discord in the watcher window.' : `Watching ${chans.length} channel${chans.length > 1 ? 's' : ''}.${last}`;
+  }
   const t = $('triggerStatus');
   if (t) t.textContent = settings.trigger.ntfyTopic ? (rt.triggerConnected ? 'Listening for outside alerts.' : rt.running ? 'Connecting…' : 'Listens while watching.') : '';
 }
@@ -227,7 +241,7 @@ function renderState(state) {
     const sp = keys.length ? rt.speed && rt.speed[keys[0]] : null;
     const speedCell = tr.querySelector('.speed');
     const laneName = { learned: 'API', template: 'API', html: 'Page' };
-    speedCell.textContent = !st || !sp ? '-' : sp.quickOff ? `Reload ${(sp.reloadMs / 1000).toFixed(0)}s${keys.length > 1 ? ` · ×${keys.length}` : ''}` : `${laneName[st.lane] || 'Page'} ${sp.quickMs ? (sp.quickMs / 1000).toFixed(1) + 's' : 'reload'}${st.rtt != null ? ' · ' + st.rtt + 'ms' : ''}${keys.length > 1 ? ` · ×${keys.length}` : ''}`;
+    speedCell.textContent = !st || !sp ? '-' : sp.mode === 'alerts' || sp.mode === 'burst' ? `${sp.mode === 'burst' ? 'Burst' : 'Safety'} ${(sp.reloadMs / 1000).toFixed(0)}s${keys.length > 1 ? ` · ×${keys.length}` : ''}` : sp.quickOff ? `Reload ${(sp.reloadMs / 1000).toFixed(0)}s${keys.length > 1 ? ` · ×${keys.length}` : ''}` : `${laneName[st.lane] || 'Page'} ${sp.quickMs ? (sp.quickMs / 1000).toFixed(1) + 's' : 'reload'}${st.rtt != null ? ' · ' + st.rtt + 'ms' : ''}${keys.length > 1 ? ` · ×${keys.length}` : ''}`;
     speedCell.title = !st ? '' : sp && sp.quickOff ? `This store refuses the quick checks, so the page is reloaded every ${(sp.reloadMs / 1000).toFixed(0)}s instead. That still catches restocks.` : `Quick check: ${st.lane || 'page'}${st.signal ? ' (' + st.signal + ')' : ''}${st.quickNote ? '; ' + st.quickNote : ''}. Full reload every ${sp ? (sp.reloadMs / 1000).toFixed(0) : '?'}s.`;
     const si = rt.signin && rt.signin[id];
     const siCell = tr.querySelector('.signin');

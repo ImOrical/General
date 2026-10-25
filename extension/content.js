@@ -37,6 +37,42 @@
     if (role === 'watch') watch();
     else if (role === 'checkout') checkout();
     else if (role === 'keeper') keeper();
+    else if (role === 'discord') discordWatch();
+  }
+
+  // ---------------------------------------------------------------- Discord
+
+  // Reads new posts in a restock channel and passes them to the background,
+  // which decides whether a post is about a PS5 Pro and which store to check.
+  // It only reads what's on screen: it never posts, reacts or clicks.
+  function discordWatch() {
+    const seen = new Set();
+    const started = Date.now();
+    const read = (li) => {
+      const text = D.textOf(li, 4000);
+      const links = [...li.querySelectorAll('a[href]')].map((a) => a.href).filter((h) => /^https?:/i.test(h) && !/discord\.com|discordapp\.(com|net)/i.test(h));
+      if (text || links.length) send({ type: 'discordAlert', text, links });
+    };
+    const scan = () => {
+      for (const li of document.querySelectorAll('li[id^="chat-messages-"]')) {
+        if (seen.has(li.id)) continue;
+        seen.add(li.id);
+        // Older posts (history loading in) are not alerts.
+        const time = li.querySelector('time[datetime]');
+        const age = time ? Date.now() - Date.parse(time.getAttribute('datetime')) : null;
+        if (age != null ? age > 120000 : Date.now() - started < 8000) continue;
+        // Restock bots post a card (embed) that renders a moment after the message.
+        setTimeout(() => read(li), 500);
+      }
+    };
+    scan();
+    let timer = null;
+    new MutationObserver(() => {
+      if (!timer) timer = setTimeout(() => ((timer = null), scan()), 150);
+    }).observe(document.body, { subtree: true, childList: true });
+    const report = () => send({ type: 'discordReady', signedIn: !/\/login|\/register/.test(location.pathname), hasMessages: !!document.querySelector('li[id^="chat-messages-"]') });
+    report();
+    setInterval(report, 60000);
   }
 
   // ---------------------------------------------------------------- watching

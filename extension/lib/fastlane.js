@@ -146,13 +146,28 @@
     gamestop: /game\s*stop/i,
   };
 
-  // A forwarded restock alert ("PS5 Pro in stock at Target!"). Returns which
-  // stores to check now; empty when it isn't about a PS5 Pro.
-  function parseTrigger(text, opts = {}) {
+  // A restock alert ("PS5 Pro in stock at Target!"), with any links in it.
+  // Returns which stores to check now and which product links to open; not
+  // matched when it isn't about a PS5 Pro.
+  function parseTrigger(text, opts = {}, links = []) {
     const t = String(text || '');
-    if (!opts.anyProduct && !C.re(C.MATCH.productTitle).test(t)) return { matched: false, stores: [] };
+    if (!opts.anyProduct && !C.re(C.MATCH.productTitle).test(t)) return { matched: false, stores: [], links: [] };
     const stores = Object.keys(STORE_NAMES).filter((id) => STORE_NAMES[id].test(t));
-    return { matched: true, stores };
+    const productLinks = [];
+    for (const href of links) {
+      let host;
+      try {
+        host = new URL(href).hostname;
+      } catch (_) {
+        continue;
+      }
+      const id = C.storeForHost(host);
+      const pdp = id && C.STORES[id].checkout.steps.find((s) => s.id === 'pdp');
+      if (!pdp || !C.re(pdp.url).test(href)) continue;
+      if (!stores.includes(id)) stores.push(id);
+      if (!productLinks.some((l) => l.url === href)) productLinks.push({ storeId: id, url: href });
+    }
+    return { matched: true, stores, links: productLinks };
   }
 
   const api = { parseStockJson, parseAod, productId, templateUrl, isLearnable, parseWindows, inWindows, easternParts, parseTrigger };

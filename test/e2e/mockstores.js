@@ -194,7 +194,9 @@ function freshStoreState() {
 }
 
 function createServer({ key, cert, port = 443 }) {
-  const state = { stores: {}, orders: [], ntfy: [], subs: {} };
+  const state = { stores: {}, orders: [], ntfy: [], subs: {}, discord: [] };
+  // A restock bot posting in the Discord channel.
+  state.discordPost = (title, fields = '', link = '') => state.discord.push({ id: 1000 + state.discord.length, at: new Date().toISOString(), title, fields, link });
   // Push a message to everyone listening on an ntfy topic (GET /topic/json).
   state.publish = (topic, message) => {
     const line = JSON.stringify({ event: 'message', topic, message }) + '\n';
@@ -221,6 +223,38 @@ function createServer({ key, cert, port = 443 }) {
         res.end();
       };
 
+      if (host === 'discord.com') {
+        if (url.pathname === '/api/mock/messages') {
+          const after = +url.searchParams.get('after') || 0;
+          return json(state.discord.filter((m) => m.id > after));
+        }
+        // Looks enough like Discord's channel view: history, then new posts with embeds.
+        const old = new Date(Date.now() - 3600000).toISOString();
+        return send(
+          200,
+          shell(
+            'restock-alerts | Discord',
+            `<main><ol data-list-id="chat-messages">
+              <li id="chat-messages-2-1"><time datetime="${old}">1h</time><div>PS5 Pro in stock at Target! (an hour ago)</div></li>
+            </ol></main>`,
+            `let last = 0;
+            setInterval(async () => {
+              const msgs = await (await fetch('/api/mock/messages?after=' + last)).json();
+              for (const m of msgs) {
+                last = m.id;
+                const li = document.createElement('li');
+                li.id = 'chat-messages-2-' + m.id;
+                li.innerHTML = '<time datetime="' + m.at + '">now</time><div id="message-content-' + m.id + '"></div>';
+                document.querySelector('ol').appendChild(li);
+                // The bot's card renders a moment later, like Discord embeds.
+                setTimeout(() => {
+                  li.insertAdjacentHTML('beforeend', '<article class="embedWrapper"><div class="embedTitle">' + m.title + '</div><div class="embedFields">' + m.fields + '</div>' + (m.link ? '<a href="' + m.link + '">Buy</a>' : '') + '</article>');
+                }, 200);
+              }
+            }, 300);`
+          )
+        );
+      }
       if (host === 'ntfy.sh') {
         const m = url.pathname.match(/^\/([^/]+)\/json$/);
         if (m && req.method === 'GET') {
@@ -326,7 +360,7 @@ function createServer({ key, cert, port = 443 }) {
     });
   });
 
-  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, state, hosts: Object.keys(STORES).concat('ntfy.sh') })));
+  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, state, hosts: Object.keys(STORES).concat('ntfy.sh', 'discord.com') })));
 }
 
 module.exports = { createServer, freshStoreState, STORES };

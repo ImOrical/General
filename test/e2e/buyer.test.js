@@ -41,6 +41,7 @@ function settingsFor(mode, enabled, extra = {}) {
   for (const id of ['psdirect', 'bestbuy', 'target', 'walmart', 'amazon', 'gamestop']) stores[id] = { enabled: enabled.includes(id), productUrl: '' };
   return {
     mode,
+    detection: 'both',
     apiIntervalSec: 1,
     fetchIntervalSec: 1,
     reloadIntervalSec: 6,
@@ -87,6 +88,7 @@ function reset() {
   for (const id of Object.keys(mock.state.stores)) mock.state.stores[id] = freshStoreState();
   mock.state.orders.length = 0;
   mock.state.ntfy.length = 0;
+  mock.state.discord.length = 0;
 }
 
 const ntfyTitles = () => mock.state.ntfy.map((n) => n.title);
@@ -459,5 +461,68 @@ test('checkout shortcut: skips the cart, and falls back when a store insists on 
     assert.equal(mock.state.stores.bestbuy.cartViewed, false, 'Best Buy went straight to checkout, no cart page');
   } finally {
     await b2.close();
+  }
+});
+
+// ---------------------------------------------------------------- Discord / alerts mode
+
+const alertsCfg = (mode, stores) =>
+  settingsFor(mode, stores, { detection: 'alerts', safetyReloadSec: 300, burstReloadSec: 3, burstMinutes: 1, discord: { channels: 'https://discord.com/channels/1/2', openLinks: true } });
+
+async function discordReady(b) {
+  await waitFor(async () => {
+    const d = Object.values((await b.state()).rt.discord || {});
+    return d.length && d.every((c) => c.signedIn);
+  }, { what: 'the Discord channel to open' });
+  await sleep(1500);
+}
+
+test('alerts mode: a Discord restock post makes it check that store and buy, with no polling in between', async () => {
+  const b = await launch(alertsCfg('armed', ['bestbuy', 'target']));
+  try {
+    await discordReady(b);
+    const hits = { bestbuy: mock.state.stores.bestbuy.pdpHits, target: mock.state.stores.target.pdpHits };
+    await sleep(5000);
+    assert.equal(mock.state.stores.bestbuy.pdpHits, hits.bestbuy, 'no checks while waiting for alerts');
+    assert.equal(mock.state.stores.target.pdpHits, hits.target, "the hour-old Target post in the channel's history didn't trigger anything");
+    mock.state.stores.bestbuy.inStock = true;
+    const posted = Date.now();
+    mock.state.discordPost('PlayStation 5 Pro Console - 2TB', 'Retailer: Best Buy · Price: $899.99');
+    await waitFor(() => mock.state.orders.length === 1, { timeout: 20000, what: 'an order' });
+    assert.equal(mock.state.orders[0].store, 'bestbuy');
+    assert.equal(mock.state.stores.target.pdpHits, hits.target, 'a Best Buy post only checks Best Buy');
+    console.log(`    Discord post -> order placed in ${((Date.now() - posted) / 1000).toFixed(1)}s`);
+  } finally {
+    await b.close();
+  }
+});
+
+test('alerts mode: a post linking a different listing opens it and buys it', async () => {
+  mock.state.stores.bestbuy.altInStock = true;
+  const b = await launch(alertsCfg('armed', ['bestbuy']));
+  try {
+    await discordReady(b);
+    mock.state.discordPost('PS5 Pro restock', 'Best Buy (new SKU)', 'https://www.bestbuy.com/site/6609999.p?skuId=6609999');
+    await waitFor(() => mock.state.orders.length === 1, { timeout: 20000, what: 'an order from the linked listing' });
+    const s = await b.state();
+    assert.match(logText(s), /opened the linked Best Buy listing/);
+  } finally {
+    await b.close();
+  }
+});
+
+test('alerts mode: posts about other products are ignored', async () => {
+  const b = await launch(alertsCfg('armed', ['bestbuy']));
+  try {
+    await discordReady(b);
+    mock.state.stores.bestbuy.inStock = true;
+    const hits = mock.state.stores.bestbuy.pdpHits;
+    mock.state.discordPost('Xbox Series X restock', 'Retailer: Best Buy', 'https://www.bestbuy.com/site/6512345.p?skuId=6512345');
+    mock.state.discordPost('PS5 Slim Digital', 'Retailer: Best Buy');
+    await sleep(4000);
+    assert.equal(mock.state.stores.bestbuy.pdpHits, hits);
+    assert.equal(mock.state.orders.length, 0);
+  } finally {
+    await b.close();
   }
 });
