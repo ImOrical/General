@@ -41,9 +41,11 @@ function settingsFor(mode, enabled, extra = {}) {
   for (const id of ['psdirect', 'bestbuy', 'target', 'walmart', 'amazon', 'gamestop']) stores[id] = { enabled: enabled.includes(id), productUrl: '' };
   return {
     mode,
+    apiIntervalSec: 1,
     fetchIntervalSec: 1,
     reloadIntervalSec: 6,
     jitterPct: 0,
+    hotWindows: '',
     alerts: { ntfyServer: 'https://ntfy.sh', ntfyTopic: 'e2e-topic', desktop: false, siren: false },
     stores,
     ...extra,
@@ -102,7 +104,7 @@ test('armed: sees the restock within seconds and places exactly one order', asyn
     // Drop once both are in steady-state watching (quick checks running).
     await waitFor(async () => {
       const { status } = (await b.state()).rt;
-      return ['bestbuy', 'target'].every((id) => status[id] && status[id].state === 'out_of_stock' && status[id].source === 'fetch');
+      return ['bestbuy', 'target'].every((id) => status[id] && status[id].state === 'out_of_stock' && status[id].source !== 'live');
     }, { what: 'both stores reported sold out' });
 
     const dropAt = Date.now();
@@ -330,5 +332,113 @@ test('dashboard vault: save encrypted, lock, wrong passphrase, unlock', async ()
     assert.equal(await page.inputValue('#vaultLogins input[data-store="bestbuy"][data-field="email"]'), 'me@example.com');
   } finally {
     await b.close();
+  }
+});
+
+// ---------------------------------------------------------------- speed
+
+const status = (b, key) => b.state().then((s) => s.rt.status[key]);
+
+test("Best Buy's stock lookup catches the restock without waiting for a page reload", async () => {
+  const b = await launch(settingsFor('monitor', ['bestbuy'], { reloadIntervalSec: 120 }));
+  try {
+    await waitFor(async () => {
+      const st = await status(b, 'bestbuy');
+      return st && st.lane === 'template' && st.state === 'out_of_stock';
+    }, { what: 'the stock lookup lane' });
+    const hitsBefore = mock.state.stores.bestbuy.apiHits;
+    const dropAt = Date.now();
+    mock.state.stores.bestbuy.inStock = true;
+    await waitFor(() => mock.state.ntfy.some((n) => /IN STOCK at Best Buy/.test(n.title)), { timeout: 15000, what: 'in-stock push' });
+    const took = Date.now() - dropAt;
+    assert.ok(mock.state.stores.bestbuy.apiHits > hitsBefore, 'used the stock lookup');
+    assert.ok(took < 5000, `took ${took}ms`);
+    const s = await b.state();
+    assert.ok(s.log.some((e) => /Hot mode/.test(e.text)), 'went hot');
+    console.log(`    stock lookup: restock -> alert in ${(took / 1000).toFixed(1)}s`);
+  } finally {
+    await b.close();
+  }
+});
+
+test("Target: learns the page's own stock request, and pickup-only stock doesn't count", async () => {
+  Object.assign(mock.state.stores.target, { pickupInStock: true });
+  const b = await launch(settingsFor('monitor', ['target'], { reloadIntervalSec: 120 }));
+  try {
+    await waitFor(async () => {
+      const st = await status(b, 'target');
+      return st && st.lane === 'learned' && st.source === 'api';
+    }, { what: 'the learned lane' });
+    assert.equal((await status(b, 'target')).state, 'out_of_stock', 'pickup-only is not in stock for shipping');
+    await sleep(2500);
+    assert.ok(!ntfyTitles().some((t) => /IN STOCK/.test(t)), 'no alert for pickup-only or the recommended product');
+    mock.state.stores.target.inStock = true;
+    await waitFor(() => ntfyTitles().some((t) => /IN STOCK at Target/.test(t)), { timeout: 15000, what: 'in-stock push' });
+  } finally {
+    await b.close();
+  }
+});
+
+test('outside alert (e.g. forwarded HotStock) makes it check that store immediately and buy', async () => {
+  const b = await launch(
+    settingsFor('armed', ['bestbuy', 'target'], { apiIntervalSec: 0, fetchIntervalSec: 0, reloadIntervalSec: 300, trigger: { ntfyTopic: 'e2e-trigger', anyProduct: false } })
+  );
+  try {
+    await waitFor(async () => (await b.state()).rt.triggerConnected, { what: 'listening on the trigger topic' });
+    await sleep(2000); // let the first page loads finish
+    mock.state.stores.bestbuy.inStock = true;
+    mock.state.publish('e2e-trigger', 'PS5 Slim in stock at Best Buy');
+    await sleep(2500);
+    assert.equal(mock.state.orders.length, 0, 'an alert about another product is ignored');
+    const sent = Date.now();
+    mock.state.publish('e2e-trigger', '🚨 PS5 Pro in stock at Best Buy!');
+    await waitFor(() => mock.state.orders.length === 1, { timeout: 20000, what: 'an order' });
+    const took = Date.now() - sent;
+    assert.equal(mock.state.orders[0].store, 'bestbuy');
+    const s = await b.state();
+    assert.ok(s.log.some((e) => e.kind === 'trigger' && /checking Best Buy now/.test(e.text)));
+    console.log(`    outside alert -> order placed in ${(took / 1000).toFixed(1)}s (with normal checks every 5 minutes)`);
+  } finally {
+    await b.close();
+  }
+});
+
+test('two listings at one store: watches both and buys the one that restocks', async () => {
+  const both = 'https://www.bestbuy.com/site/6601524.p?skuId=6601524 https://www.bestbuy.com/site/6609999.p?skuId=6609999';
+  const cfg = settingsFor('armed', ['bestbuy']);
+  cfg.stores.bestbuy.productUrl = both;
+  const b = await launch(cfg);
+  try {
+    await waitFor(async () => {
+      const s = await b.state();
+      return s.rt.status.bestbuy && s.rt.status['bestbuy#2'];
+    }, { what: 'both listings reporting' });
+    mock.state.stores.bestbuy.altInStock = true;
+    await waitFor(() => mock.state.orders.length === 1, { what: 'an order' });
+    assert.equal((await status(b, 'bestbuy#2')).state, 'in_stock');
+  } finally {
+    await b.close();
+  }
+});
+
+test('checkout shortcut: skips the cart, and falls back when a store insists on it', async () => {
+  mock.state.stores.bestbuy.inStock = true;
+  mock.state.stores.walmart.inStock = true;
+  const b = await launch(settingsFor('armed', ['walmart']));
+  try {
+    await waitFor(() => mock.state.orders.length === 1, { what: 'Walmart order via the cart' });
+    const s = await b.state();
+    assert.match(logText(s), /straight to checkout/);
+    assert.equal(mock.state.stores.walmart.cartViewed, true, 'Walmart bounced it to the cart, which still worked');
+  } finally {
+    await b.close();
+  }
+  mock.state.orders.length = 0;
+  const b2 = await launch(settingsFor('armed', ['bestbuy']));
+  try {
+    await waitFor(() => mock.state.orders.length === 1, { what: 'Best Buy order' });
+    assert.equal(mock.state.stores.bestbuy.cartViewed, false, 'Best Buy went straight to checkout, no cart page');
+  } finally {
+    await b2.close();
   }
 });

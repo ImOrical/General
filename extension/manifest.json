@@ -35,7 +35,7 @@
         "https://www.gamestop.com/*",
         "https://*.queue-it.net/*"
       ],
-      "js": ["lib/config.js", "lib/detect.js", "lib/flow.js", "content.js"],
+      "js": ["lib/config.js", "lib/detect.js", "lib/flow.js", "lib/fastlane.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": true
     }

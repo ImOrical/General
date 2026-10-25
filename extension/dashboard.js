@@ -25,7 +25,9 @@ let lastState = null;
 async function loadSettings() {
   const { settings: saved } = await chrome.storage.local.get('settings');
   settings = C.resolveSettings(saved);
-  for (const k of ['priceCap', 'minPrice', 'fetchIntervalSec', 'reloadIntervalSec', 'jitterPct', 'keeperHours']) $(k).value = settings[k];
+  for (const k of ['priceCap', 'minPrice', 'apiIntervalSec', 'fetchIntervalSec', 'reloadIntervalSec', 'jitterPct', 'keeperHours', 'hotMinutes', 'hotWindows']) $(k).value = settings[k];
+  $('triggerTopic').value = settings.trigger.ntfyTopic || '';
+  $('triggerAny').checked = !!settings.trigger.anyProduct;
   $('cacheBust').checked = !!settings.cacheBust;
   $('autoStart').checked = !!settings.autoStart;
   for (const k of ALERT_FIELDS) $(k).value = settings.alerts[k] || '';
@@ -54,6 +56,7 @@ function buildStoreRows() {
       <td class="price">-</td>
       <td class="seller" title="">-</td>
       <td class="age">-</td>
+      <td class="speed">-</td>
       <td class="signin">-</td>
       <td><button class="small practice">Practice</button></td>`;
     const s = settings.stores[id] || {};
@@ -71,7 +74,11 @@ function readForm() {
   };
   settings.priceCap = num('priceCap');
   settings.minPrice = num('minPrice');
+  settings.apiIntervalSec = Math.max(0, num('apiIntervalSec'));
   settings.fetchIntervalSec = Math.max(0, num('fetchIntervalSec'));
+  settings.hotMinutes = Math.max(1, num('hotMinutes'));
+  settings.hotWindows = $('hotWindows').value.trim();
+  settings.trigger = { ntfyTopic: $('triggerTopic').value.trim(), anyProduct: $('triggerAny').checked };
   settings.reloadIntervalSec = Math.max(5, num('reloadIntervalSec'));
   settings.jitterPct = Math.min(80, Math.max(0, num('jitterPct')));
   settings.cacheBust = $('cacheBust').checked;
@@ -111,6 +118,30 @@ async function runPractice(id, name) {
   if (!url) return;
   const r = await send({ type: 'practice', storeId: id, url: url.trim() });
   if (r && r.error) alert(r.error);
+}
+
+function renderSpeed(rt) {
+  const pill = $('speedPill');
+  const now = Date.now();
+  const hotUntil = Math.max(rt.hot ? rt.hot.all || 0 : 0, ...Object.values((rt.hot && rt.hot.stores) || {}));
+  const modes = Object.values(rt.speed || {}).map((s) => s.mode);
+  if (rt.running && hotUntil > now) {
+    const left = Math.ceil((hotUntil - now) / 1000);
+    pill.textContent = `HOT ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+    pill.className = 'pill bad';
+    pill.title = rt.hot.reason ? 'Checking faster because: ' + rt.hot.reason : '';
+  } else if (rt.running && modes.includes('warm')) {
+    pill.textContent = 'WARM';
+    pill.className = 'pill warn';
+    pill.title = 'Inside a hot window: checking a bit faster';
+  } else {
+    pill.textContent = rt.running ? 'Normal speed' : 'Stopped';
+    pill.className = 'pill neutral';
+    pill.title = '';
+  }
+  $('goHot').textContent = hotUntil > now ? 'Cool down' : 'Go hot 30 min';
+  const t = $('triggerStatus');
+  if (t) t.textContent = settings.trigger.ntfyTopic ? (rt.triggerConnected ? 'Listening for outside alerts.' : rt.running ? 'Connecting…' : 'Listens while watching.') : '';
 }
 
 function ago(ts) {
@@ -165,10 +196,15 @@ function renderState(state) {
     addBanner('warn', 'Running without phone alerts. Set an ntfy topic below so you hear about drops away from the PC.');
   }
 
+  renderSpeed(rt);
   for (const tr of document.querySelectorAll('#stores tbody tr')) {
     const id = tr.dataset.store;
-    const st = rt.status[id];
-    const watching = rt.running && rt.watchers[id] != null;
+    // A store can have several listings; show the most interesting one.
+    const keys = Object.keys(rt.status).filter((k) => k === id || k.startsWith(id + '#'));
+    const rank = (k) => ['in_stock', 'queue', 'invite', 'out_of_stock', 'unknown', 'blocked', 'error'].indexOf(rt.status[k].state);
+    keys.sort((a, b) => rank(a) - rank(b) || rt.status[b].at - rt.status[a].at);
+    const st = keys.length ? rt.status[keys[0]] : null;
+    const watching = rt.running && Object.keys(rt.watchers).some((k) => k === id || k.startsWith(id + '#'));
     const paused = rt.paused[id];
     const enabled = tr.querySelector('.enabled').checked;
     const hasLink = !!(tr.querySelector('.url').value.trim() || C.STORES[id].productUrl);
@@ -190,6 +226,11 @@ function renderState(state) {
     sellerCell.textContent = seller;
     sellerCell.title = seller;
     tr.querySelector('.age').textContent = st ? `${ago(st.at)} (${st.source})` : '-';
+    const sp = keys.length ? rt.speed && rt.speed[keys[0]] : null;
+    const speedCell = tr.querySelector('.speed');
+    const laneName = { learned: 'API', template: 'API', html: 'Page' };
+    speedCell.textContent = st && sp ? `${laneName[st.lane] || 'Page'} ${sp.quickMs ? (sp.quickMs / 1000).toFixed(1) + 's' : 'reload'}${st.rtt != null ? ' · ' + st.rtt + 'ms' : ''}${keys.length > 1 ? ` · ×${keys.length}` : ''}` : '-';
+    speedCell.title = st ? `Quick check: ${st.lane || 'page'}${st.signal ? ' (' + st.signal + ')' : ''}. Full reload every ${sp ? (sp.reloadMs / 1000).toFixed(0) : '?'}s.` : '';
     const si = rt.signin && rt.signin[id];
     const siCell = tr.querySelector('.signin');
     siCell.textContent = si ? { ok: 'Yes', auto: 'Yes (re-signed in)', needs_you: 'No: sign in', timeout: 'Unknown' }[si.state] || si.state : '-';
@@ -253,6 +294,16 @@ $('testAlert').addEventListener('click', async () => {
 
 $('genTopic').addEventListener('click', () => {
   $('ntfyTopic').value = randomTopic();
+});
+
+$('genTrigger').addEventListener('click', () => {
+  $('triggerTopic').value = randomTopic().replace('ps5pro-', 'ps5in-');
+});
+
+$('goHot').addEventListener('click', async () => {
+  const hot = /Cool/.test($('goHot').textContent);
+  await send({ type: hot ? 'coolDown' : 'goHot', minutes: 30 });
+  refresh();
 });
 
 $('clearLog').addEventListener('click', async () => {

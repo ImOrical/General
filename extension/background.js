@@ -1,9 +1,10 @@
 // Coordinator: opens the watcher tabs, paces checks, decides when to buy, makes
 // sure only one order is ever placed, and sends alerts.
-importScripts('lib/config.js', 'lib/detect.js');
+importScripts('lib/config.js', 'lib/detect.js', 'lib/fastlane.js');
 
 const C = PS5Config;
 const D = PS5Detect;
+const FL = PS5Fast;
 
 const LEVEL = {
   in_stock: 'urgent',
@@ -17,6 +18,8 @@ const LEVEL = {
   stale: 'high',
   invite: 'high',
   signin: 'high',
+  hot: 'low',
+  trigger: 'low',
   info: 'low',
   heartbeat: 'low',
 };
@@ -28,7 +31,7 @@ let settings = C.resolveSettings({});
 let rt = freshRuntime();
 let purchased = null;
 let log = [];
-const next = {}; // per-store check schedule; fine to lose on worker restart
+const next = {}; // per-listing check schedule; fine to lose on worker restart
 const notificationTabs = {};
 let tickTimer = null;
 
@@ -38,9 +41,19 @@ function freshRuntime() {
   return {
     running: false,
     windowId: null,
-    watchers: {}, // storeId -> tabId
-    roles: {}, // tabId -> { role: 'watch'|'checkout', storeId, practice, ... }
-    status: {}, // storeId -> last detection summary
+    // A "watch" is one listing being watched; its key is the store id, or
+    // "bestbuy#2" for a second Best Buy listing.
+    watchers: {}, // watch key -> tabId
+    watches: {}, // watch key -> { storeId, url }
+    roles: {}, // tabId -> { role: 'watch'|'checkout'|'keeper', storeId, key, url, practice, ... }
+    status: {}, // watch key -> last detection summary
+    speed: {}, // watch key -> { quickMs, reloadMs, factor }
+    hot: { all: 0, stores: {}, reason: '' }, // checking faster until these times
+    apiIn: {}, // watch key -> when a quick check last said in stock
+    apiMisses: {}, // watch key -> quick-check "in stock" that the real page didn't confirm
+    distrust: {}, // watch key -> ignore quick checks until this time
+    lastTrigger: {}, // storeId -> last outside alert handled
+    triggerConnected: false,
     backoff: {}, // storeId -> { level, until, fetchLevel, fetchUntil }
     paused: {}, // storeId -> 'queue' | 'checkout'
     lock: null, // { storeId, tabId, at, clicked }
@@ -81,7 +94,14 @@ function addLog(kind, text) {
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes.settings) settings = C.resolveSettings(changes.settings.newValue);
+  if (area === 'local' && changes.settings) {
+    const before = settings.trigger.ntfyTopic;
+    settings = C.resolveSettings(changes.settings.newValue);
+    if (settings.trigger.ntfyTopic !== before) {
+      stopTriggerStream();
+      startTriggerStream();
+    }
+  }
 });
 
 const storeName = (id) => (C.STORES[id] ? C.STORES[id].name : id);
@@ -196,7 +216,15 @@ async function focusTab(tabId) {
 // ------------------------------------------------------------------ watching
 
 function enabledStores() {
-  return Object.keys(C.STORES).filter((id) => settings.stores[id] && settings.stores[id].enabled && store(id).productUrl);
+  return Object.keys(C.STORES).filter((id) => settings.stores[id] && settings.stores[id].enabled && C.watchUrls(id, settings).length);
+}
+
+function watchList() {
+  return enabledStores().flatMap((id) => C.watchUrls(id, settings).map((url, i) => ({ key: i ? `${id}#${i + 1}` : id, storeId: id, url })));
+}
+
+function keysFor(storeId) {
+  return Object.keys(rt.watchers).filter((k) => rt.watches[k] && rt.watches[k].storeId === storeId);
 }
 
 // Opens a tab with a role already assigned, so its content script knows what to do
@@ -225,15 +253,22 @@ async function start() {
   rt.placeClicks = {};
   rt.attempts = {};
   rt.status = {};
+  rt.watches = {};
+  rt.speed = {};
+  rt.apiIn = {};
+  rt.apiMisses = {};
+  rt.distrust = {};
   const now = Date.now();
-  for (const [i, id] of ids.entries()) {
-    const tabId = await openRoleTab(win.id, store(id).productUrl, { role: 'watch', storeId: id, lastReport: now });
-    rt.watchers[id] = tabId;
-    // Stagger stores so their checks don't all land in the same second.
-    next[id] = { fetch: now + 2000 + i * 400, reload: now + jitter(settings.reloadIntervalSec * 1000) + i * 1500 };
+  for (const [i, w] of watchList().entries()) {
+    const tabId = await openRoleTab(win.id, w.url, { role: 'watch', storeId: w.storeId, key: w.key, url: w.url, lastReport: now });
+    rt.watchers[w.key] = tabId;
+    rt.watches[w.key] = { storeId: w.storeId, url: w.url };
+    // Stagger listings so their checks don't all land in the same second.
+    next[w.key] = { fetch: now + 2000 + i * 300, reload: now + jitter(settings.reloadIntervalSec * 1000) + i * 1500 };
   }
   if (blankTab) chrome.tabs.remove(blankTab.id).catch(() => {});
   ensureTicking();
+  startTriggerStream();
   save();
   rt.lastKeeper = 0; // check sign-ins on the next keepalive tick
   const vault = await vaultState();
@@ -250,6 +285,7 @@ async function stop() {
   rt.windowId = null;
   rt.watchers = {};
   rt.paused = {};
+  stopTriggerStream();
   if (windowId != null) await chrome.windows.remove(windowId).catch(() => {});
   addLog('info', 'Watcher stopped');
   save();
@@ -269,31 +305,85 @@ function reloadTab(tabId) {
   chrome.tabs.reload(tabId, { bypassCache: true }).catch(() => {});
 }
 
+// ------------------------------------------------------------------ speed
+
+let windowsCache = { text: null, list: [] };
+function hotWindows() {
+  if (windowsCache.text !== settings.hotWindows) windowsCache = { text: settings.hotWindows, list: FL.parseWindows(settings.hotWindows) };
+  return windowsCache.list;
+}
+
+function isHot(storeId, now = Date.now()) {
+  return Math.max(rt.hot.all || 0, (rt.hot.stores || {})[storeId] || 0) > now;
+}
+
+// 'hot', 'warm' or 'normal', and the multiplier applied to check intervals.
+function speedMode(storeId, now, warm) {
+  if (isHot(storeId, now)) return { mode: 'hot', factor: settings.hotFactor };
+  if (warm) return { mode: 'warm', factor: settings.warmFactor };
+  return { mode: 'normal', factor: 1 };
+}
+
+// Check faster for a while. stores = null means every store.
+function goHot(stores, minutes, reason) {
+  const now = Date.now();
+  const until = now + minutes * 60000;
+  const ids = stores || Object.keys(C.STORES);
+  const wasHot = ids.some((id) => isHot(id, now));
+  if (stores) for (const id of stores) rt.hot.stores[id] = Math.max(rt.hot.stores[id] || 0, until);
+  else rt.hot.all = Math.max(rt.hot.all || 0, until);
+  rt.hot.reason = reason;
+  if (!wasHot) addLog('hot', `Hot mode for ${minutes} min (${stores ? stores.map(storeName).join(', ') : 'all stores'}): ${reason}`);
+  // Pull the next quick checks in so the faster pace starts now.
+  for (const key of Object.keys(rt.watchers)) {
+    const w = rt.watches[key];
+    if (w && ids.includes(w.storeId) && next[key]) next[key].fetch = Math.min(next[key].fetch, now + 250);
+  }
+}
+
+// Reload every listing at a store right now (an outside alert says it dropped).
+function checkNow(storeId) {
+  for (const key of keysFor(storeId)) {
+    const tabId = rt.watchers[key];
+    const role = rt.roles[tabId];
+    if (!role || role.role !== 'watch' || rt.paused[storeId]) continue;
+    reloadTab(tabId);
+    if (next[key]) next[key].reload = Date.now() + jitter(settings.reloadIntervalSec * 1000);
+  }
+}
+
 function tick() {
   if (!rt.running) return stopTicking();
   const now = Date.now();
-  const fetchMs = Math.max(1, settings.fetchIntervalSec) * 1000;
-  const reloadMs = Math.max(5, settings.reloadIntervalSec) * 1000;
+  const warm = FL.inWindows(new Date(now), hotWindows());
 
-  for (const [id, tabId] of Object.entries(rt.watchers)) {
+  for (const [key, tabId] of Object.entries(rt.watchers)) {
     const role = rt.roles[tabId];
+    const id = role && role.storeId;
     if (!role || role.role !== 'watch' || rt.paused[id]) continue;
-    const n = next[id] || (next[id] = { fetch: now + jitter(fetchMs), reload: now + jitter(reloadMs) });
+    const { mode, factor } = speedMode(id, now, warm);
+    const st = rt.status[key] || {};
+    const apiLane = st.lane === 'learned' || st.lane === 'template';
+    const baseSec = apiLane ? settings.apiIntervalSec : settings.fetchIntervalSec;
+    const quickMs = baseSec > 0 ? Math.max(1000, baseSec * 1000 * factor) : 0;
+    const reloadMs = Math.max(5000, settings.reloadIntervalSec * 1000 * factor);
+    rt.speed[key] = { quickMs, reloadMs, mode };
+    const n = next[key] || (next[key] = { fetch: now + jitter(quickMs || 4000), reload: now + jitter(reloadMs) });
     const bo = rt.backoff[id] || {};
     if (bo.until > now) continue;
 
     if (now >= n.reload) {
       n.reload = now + jitter(reloadMs);
-      n.fetch = now + jitter(fetchMs) + 1500; // let the reloaded page settle first
+      n.fetch = now + jitter(quickMs || 4000) + 1500; // let the reloaded page settle first
       reloadTab(tabId);
-    } else if (settings.fetchIntervalSec > 0 && now >= n.fetch && !(bo.fetchUntil > now)) {
-      n.fetch = now + jitter(fetchMs);
+    } else if (quickMs && now >= n.fetch && !(bo.fetchUntil > now)) {
+      n.fetch = now + jitter(quickMs);
       chrome.tabs.sendMessage(tabId, { type: 'fetchCheck' }).catch(() => {});
     }
 
     if (role.lastReport && now - role.lastReport > 3 * reloadMs + 15000) {
       role.lastReport = now;
-      alert('stale', `${storeName(id)} watcher went quiet`, 'Reloading it. If this keeps happening, check that tab.', { key: 'stale:' + id, dedupeMs: 15 * 60000 });
+      alert('stale', `${storeName(id)} watcher went quiet`, 'Reloading it. If this keeps happening, check that tab.', { key: 'stale:' + key, dedupeMs: 15 * 60000 });
       reloadTab(tabId);
     }
   }
@@ -339,12 +429,15 @@ function clearBackoff(id, source) {
   else bo.level = 0;
 }
 
-function checkoutCtx(id, practice) {
+function checkoutCtx(id, practice, role) {
+  // Set for a few seconds after jumping straight to checkout, so the next page
+  // knows to fall back to the cart if the shortcut didn't work.
+  const viaDirect = !!(role && role.viaDirect && Date.now() - role.viaDirect < 20000);
   return {
     role: 'checkout',
     storeId: id,
     store: store(id),
-    checkout: { mode: settings.mode, practice: !!practice, priceCap: settings.priceCap, minPrice: settings.minPrice },
+    checkout: { mode: settings.mode, practice: !!practice, priceCap: settings.priceCap, minPrice: settings.minPrice, viaDirect },
   };
 }
 
@@ -353,11 +446,17 @@ function roleFor(tabId) {
   if (!role) return { role: 'none' };
   if (role.role === 'watch') {
     role.lastReport = Date.now();
-    return { role: 'watch', storeId: role.storeId, store: store(role.storeId), settings: { cacheBust: settings.cacheBust } };
+    const distrustApi = (rt.distrust[role.key] || 0) > Date.now();
+    return {
+      role: 'watch',
+      storeId: role.storeId,
+      store: store(role.storeId),
+      settings: { cacheBust: settings.cacheBust, distrustApi, priceCap: settings.priceCap, minPrice: settings.minPrice },
+    };
   }
   if (role.role === 'checkout') {
     role.lastEvent = Date.now();
-    return checkoutCtx(role.storeId, role.practice);
+    return checkoutCtx(role.storeId, role.practice, role);
   }
   if (role.role === 'keeper') return { role: 'keeper', storeId: role.storeId, store: store(role.storeId) };
   return { role: 'none' };
@@ -367,13 +466,18 @@ function onStatus(tabId, result) {
   const role = rt.roles[tabId];
   if (!role || role.role !== 'watch') return { go: false };
   const id = role.storeId;
+  const key = role.key || id;
   const name = storeName(id);
-  const s = store(id);
-  role.lastReport = Date.now();
-  rt.status[id] = {
+  const productUrl = role.url || store(id).productUrl;
+  const now = Date.now();
+  role.lastReport = now;
+  rt.status[key] = {
     state: result.state,
     source: result.source,
-    at: result.at || Date.now(),
+    lane: result.lane || (rt.status[key] && rt.status[key].lane) || 'html',
+    rtt: result.rtt ?? (rt.status[key] && rt.status[key].rtt) ?? null,
+    signal: result.signal || '',
+    at: result.at || now,
     price: result.price ?? null,
     seller: result.seller || '',
     firstParty: result.firstParty ?? null,
@@ -381,69 +485,91 @@ function onStatus(tabId, result) {
     signals: result.signals || null,
     error: result.error || (result.httpStatus ? 'HTTP ' + result.httpStatus : ''),
   };
+  const quick = result.source === 'fetch' || result.source === 'api';
 
   if (result.state === 'error') return { go: false };
   if (result.state === 'blocked') {
-    applyBackoff(id, result.source);
-    const what = result.source === 'fetch' ? 'is rate-limiting the quick checks (slowing them down)' : 'is showing a bot check in the watcher tab. Solve it once so watching can continue.';
-    alert('blocked', `${name} blocked a check`, `${name} ${what}`, { key: 'blocked:' + id + ':' + result.source, dedupeMs: 20 * 60000, tabId });
+    applyBackoff(id, quick ? 'fetch' : 'live');
+    const what = quick ? 'is rate-limiting the quick checks (slowing them down)' : 'is showing a bot check in the watcher tab. Solve it once so watching can continue.';
+    alert('blocked', `${name} blocked a check`, `${name} ${what}`, { key: 'blocked:' + id + ':' + (quick ? 'fetch' : 'live'), dedupeMs: 20 * 60000, tabId });
     return { go: false };
   }
-  clearBackoff(id, result.source);
+  clearBackoff(id, quick ? 'fetch' : 'live');
 
   if (result.state === 'queue') {
     if (rt.paused[id] !== 'queue') {
       rt.paused[id] = 'queue';
-      alert('queue', `${name} queue is open`, `A waiting room just appeared at ${name}, which usually means a drop. Holding your place; don't close the tab.`, { key: 'queue:' + id, dedupeMs: 10 * 60000, tabId, url: s.productUrl });
+      goHot(null, settings.hotMinutes, `${name} opened a queue`);
+      alert('queue', `${name} queue is open`, `A waiting room just appeared at ${name}, which usually means a drop. Holding your place; don't close the tab.`, { key: 'queue:' + id, dedupeMs: 10 * 60000, tabId, url: productUrl });
     }
     return { go: false };
   }
   if (rt.paused[id] === 'queue') delete rt.paused[id];
 
   if (result.state === 'invite') {
-    alert('invite', `${name} is invite-only`, `${name} is selling the PS5 Pro by invitation. Open the listing and press "Request invitation".`, { key: 'invite:' + id, dedupeMs: 6 * 3600000, url: s.productUrl });
+    alert('invite', `${name} is invite-only`, `${name} is selling the PS5 Pro by invitation. Open the listing and press "Request invitation".`, { key: 'invite:' + id, dedupeMs: 6 * 3600000, url: productUrl });
     return { go: false };
+  }
+
+  // The real page disagreed with a quick check that said "in stock". Three of
+  // those in 10 minutes and that listing's quick checks are ignored for 30.
+  if (!quick && result.state !== 'in_stock' && now - (rt.apiIn[key] || 0) < 30000) {
+    rt.apiIn[key] = 0;
+    const misses = (rt.apiMisses[key] || []).filter((t) => now - t < 10 * 60000).concat(now);
+    rt.apiMisses[key] = misses;
+    if (misses.length >= 3) {
+      rt.distrust[key] = now + 30 * 60000;
+      rt.apiMisses[key] = [];
+      addLog('info', `${name}: quick checks said in stock 3 times but the page didn't agree; using page checks only for 30 min`);
+    }
   }
   if (result.state !== 'in_stock') return { go: false };
 
-  if (result.source === 'fetch') {
+  if (quick) {
     // The quick check thinks it's in stock: reload now to confirm on the real page.
-    if (!rt.lastFetchReload[id] || Date.now() - rt.lastFetchReload[id] > 20000) {
-      rt.lastFetchReload[id] = Date.now();
-      next[id] = Object.assign(next[id] || {}, { reload: Date.now() + jitter(settings.reloadIntervalSec * 1000) });
+    rt.apiIn[key] = now;
+    goHot(null, settings.hotMinutes, `${name} quick check saw stock`);
+    if (!rt.lastFetchReload[key] || now - rt.lastFetchReload[key] > 10000) {
+      rt.lastFetchReload[key] = now;
+      next[key] = Object.assign(next[key] || {}, { reload: now + jitter(settings.reloadIntervalSec * 1000) });
       reloadTab(tabId);
     }
     return { go: false };
   }
 
   const verdict = D.evaluate(result, settings);
-  rt.status[id].verdict = verdict;
+  rt.status[key].verdict = verdict;
   if (!verdict.ok) {
     if (verdict.alert) {
-      alert('needs_you', `${name}: in stock, needs a look`, `${verdict.reasons.join('; ')}. Not buying automatically.`, { key: 'check:' + id, dedupeMs: 5 * 60000, tabId, url: s.productUrl });
+      alert('needs_you', `${name}: in stock, needs a look`, `${verdict.reasons.join('; ')}. Not buying automatically.`, { key: 'check:' + key, dedupeMs: 5 * 60000, tabId, url: productUrl });
+    } else if (id === 'amazon' && now - (rt.apiIn[key] || 0) < 30000 && result.firstParty === false) {
+      // Amazon's own offer is listed, but a third-party seller holds the buy box.
+      alert('needs_you', 'Amazon has its own PS5 Pro offer', `It's under "Other sellers" on the listing, not in the buy box, so it can't be bought automatically. Open the listing and pick the offer sold by Amazon.com.`, { key: 'aod:' + key, dedupeMs: 5 * 60000, tabId, url: productUrl });
     }
     return { go: false };
   }
   if (purchased) return { go: false };
+  goHot(null, settings.hotMinutes, `${name} is in stock`);
 
   const price = result.price != null ? `$${result.price.toFixed(2)}` : '';
   const buying = settings.mode === 'armed' ? 'Buying now.' : settings.mode === 'dryrun' ? 'Dry run: going to Place Order but not clicking it.' : 'Go buy it!';
-  alert('in_stock', `PS5 Pro IN STOCK at ${name}`, `${price} sold by ${name}. ${buying}`, { key: 'instock:' + id, dedupeMs: 2 * 60000, tabId, url: s.productUrl });
+  const lead = rt.apiIn[key] ? ` Spotted by the quick check ${((now - rt.apiIn[key]) / 1000).toFixed(1)}s ago.` : '';
+  alert('in_stock', `PS5 Pro IN STOCK at ${name}`, `${price} sold by ${name}. ${buying}${lead}`, { key: 'instock:' + key, dedupeMs: 2 * 60000, tabId, url: productUrl });
 
   if (settings.mode === 'armed' || settings.mode === 'dryrun') {
     // A checkout that keeps failing the same way (e.g. a changed page) shouldn't
     // hammer the store: at most 5 tries per store per 10 minutes.
-    const recent = (rt.attempts[id] || []).filter((t) => Date.now() - t < 10 * 60000);
+    const recent = (rt.attempts[id] || []).filter((t) => now - t < 10 * 60000);
     if (recent.length >= 5) {
-      alert('needs_you', `${name}: checkout keeps failing`, `Tried 5 times in 10 minutes. Not retrying for now. It's in stock, so try it by hand.`, { key: 'attempts:' + id, dedupeMs: 10 * 60000, tabId, url: s.productUrl });
+      alert('needs_you', `${name}: checkout keeps failing`, `Tried 5 times in 10 minutes. Not retrying for now. It's in stock, so try it by hand.`, { key: 'attempts:' + id, dedupeMs: 10 * 60000, tabId, url: productUrl });
       return { go: false };
     }
-    rt.attempts[id] = recent.concat(Date.now());
-    rt.roles[tabId] = { role: 'checkout', storeId: id, practice: false, startedAt: Date.now(), lastEvent: Date.now() };
+    rt.attempts[id] = recent.concat(now);
+    rt.roles[tabId] = { role: 'checkout', storeId: id, key, url: productUrl, watchUrl: productUrl, practice: false, startedAt: now, lastEvent: now };
     rt.paused[id] = 'checkout';
     focusTab(tabId);
     save();
-    return { go: true, ctx: checkoutCtx(id, false) };
+    return { go: true, ctx: checkoutCtx(id, false, rt.roles[tabId]) };
   }
   focusTab(tabId);
   return { go: false };
@@ -452,22 +578,25 @@ function onStatus(tabId, result) {
 // ------------------------------------------------------------------ checkout
 
 async function backToWatching(tabId, role) {
-  if (role.practice || !rt.running || rt.watchers[role.storeId] !== tabId) {
+  const key = role.key || role.storeId;
+  if (role.practice || !rt.running || rt.watchers[key] !== tabId) {
     delete rt.roles[tabId];
     return;
   }
-  rt.roles[tabId] = { role: 'watch', storeId: role.storeId, lastReport: Date.now() };
+  const url = (rt.watches[key] && rt.watches[key].url) || store(role.storeId).productUrl;
+  rt.roles[tabId] = { role: 'watch', storeId: role.storeId, key, url, lastReport: Date.now() };
   delete rt.paused[role.storeId];
-  await chrome.tabs.update(tabId, { url: store(role.storeId).productUrl }).catch(() => {});
+  await chrome.tabs.update(tabId, { url }).catch(() => {});
 }
 
 // The dry-run tab stays open for you to finish by hand, so open a fresh watcher.
-async function replaceWatcher(storeId) {
-  if (!rt.running || rt.windowId == null) return;
+async function replaceWatcher(key) {
+  const w = rt.watches[key];
+  if (!rt.running || rt.windowId == null || !w) return;
   try {
-    const tabId = await openRoleTab(rt.windowId, store(storeId).productUrl, { role: 'watch', storeId, lastReport: Date.now() });
-    rt.watchers[storeId] = tabId;
-    delete rt.paused[storeId];
+    const tabId = await openRoleTab(rt.windowId, w.url, { role: 'watch', storeId: w.storeId, key, url: w.url, lastReport: Date.now() });
+    rt.watchers[key] = tabId;
+    delete rt.paused[w.storeId];
   } catch (_) {
     // Watcher window is gone; nothing to replace into.
   }
@@ -487,6 +616,8 @@ async function onCheckout(tabId, msg) {
     case 'step':
       role.step = msg.step;
       role.waiting = null;
+      if (msg.direct === true) role.viaDirect = Date.now();
+      if (msg.direct === false || msg.step === 'cart') role.viaDirect = 0;
       addLog('step', `${label}: ${msg.step}`);
       break;
 
@@ -552,7 +683,7 @@ async function onCheckout(tabId, msg) {
         focusTab(tabId);
       }
       delete rt.roles[tabId];
-      if (!role.practice) await replaceWatcher(id);
+      if (!role.practice) await replaceWatcher(role.key || id);
       break;
     }
 
@@ -576,6 +707,83 @@ async function onCheckout(tabId, msg) {
   }
   save();
   return {};
+}
+
+// ------------------------------------------------------------------ outside alerts
+
+// Listens on an ntfy topic for restock alerts from elsewhere (HotStock forwarded
+// from your phone, a Discord bot, anything that can POST a line of text). An
+// alert never buys anything by itself: it makes us check that store right now.
+let triggerAbort = null;
+
+function startTriggerStream() {
+  const topic = settings.trigger && settings.trigger.ntfyTopic;
+  if (!topic || !rt.running || triggerAbort) return;
+  const ctrl = new AbortController();
+  triggerAbort = ctrl;
+  (async () => {
+    let wait = 1000;
+    while (!ctrl.signal.aborted && rt.running) {
+      try {
+        const server = settings.alerts.ntfyServer.replace(/\/+$/, '');
+        const resp = await fetch(`${server}/${encodeURIComponent(topic)}/json`, { signal: ctrl.signal, cache: 'no-store' });
+        if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+        rt.triggerConnected = true;
+        wait = 1000;
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let nl;
+          while ((nl = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, nl).trim();
+            buf = buf.slice(nl + 1);
+            if (line) onTriggerLine(line);
+          }
+        }
+      } catch (_) {
+        // Dropped connection; retry below.
+      }
+      rt.triggerConnected = false;
+      if (ctrl.signal.aborted) break;
+      await new Promise((r) => setTimeout(r, wait));
+      wait = Math.min(wait * 2, 30000);
+    }
+    if (triggerAbort === ctrl) triggerAbort = null;
+  })();
+}
+
+function stopTriggerStream() {
+  if (triggerAbort) triggerAbort.abort();
+  triggerAbort = null;
+  rt.triggerConnected = false;
+}
+
+function onTriggerLine(line) {
+  let msg;
+  try {
+    msg = JSON.parse(line);
+  } catch (_) {
+    return;
+  }
+  if (msg.event !== 'message') return;
+  const text = [msg.title, msg.message].filter(Boolean).join(' ');
+  const t = FL.parseTrigger(text, { anyProduct: settings.trigger.anyProduct });
+  if (!t.matched) {
+    addLog('trigger', `Ignored an outside alert that isn't about a PS5 Pro: "${text.slice(0, 80)}"`);
+    return;
+  }
+  const now = Date.now();
+  const ids = (t.stores.length ? t.stores : enabledStores()).filter((id) => keysFor(id).length && now - (rt.lastTrigger[id] || 0) > 5000);
+  if (!ids.length) return;
+  for (const id of ids) rt.lastTrigger[id] = now;
+  goHot(ids, settings.hotMinutes, 'outside alert');
+  for (const id of ids) checkNow(id);
+  addLog('trigger', `Outside alert, checking ${ids.map(storeName).join(', ')} now: "${text.slice(0, 100)}"`);
+  save();
 }
 
 // ------------------------------------------------------------------ vault, sign-in, keeper
@@ -705,6 +913,15 @@ async function handle(msg, sender) {
     case 'checkSignins':
       runKeeper();
       return { ok: true };
+    case 'goHot':
+      goHot(null, msg.minutes || 30, 'you turned it on');
+      save();
+      return { ok: true };
+    case 'coolDown':
+      rt.hot = { all: 0, stores: {}, reason: '' };
+      addLog('hot', 'Hot mode turned off');
+      save();
+      return { ok: true };
     case 'start':
       return start();
     case 'stop':
@@ -751,9 +968,10 @@ chrome.tabs.onRemoved.addListener((tabId, info) => {
     const role = rt.roles[tabId];
     delete rt.roles[tabId];
     if (rt.lock && rt.lock.tabId === tabId && !rt.lock.clicked) rt.lock = null;
-    if (role && rt.running && !info.isWindowClosing && rt.watchers[role.storeId] === tabId) {
+    const key = role && (role.key || role.storeId);
+    if (role && rt.running && !info.isWindowClosing && rt.watchers[key] === tabId) {
       addLog('info', `${storeName(role.storeId)} watcher tab was closed; reopening it`);
-      replaceWatcher(role.storeId);
+      replaceWatcher(key);
     }
     save();
   });
@@ -776,10 +994,11 @@ chrome.alarms.onAlarm.addListener((a) => {
   ready.then(() => {
     if (a.name === 'keepalive' && rt.running) {
       ensureTicking();
+      startTriggerStream();
       if (settings.keeperHours > 0 && Date.now() - rt.lastKeeper > settings.keeperHours * 3600000) runKeeper();
     }
     if (a.name === 'heartbeat' && rt.running) {
-      const parts = Object.keys(rt.watchers).map((id) => `${storeName(id)}: ${(rt.status[id] && rt.status[id].state) || 'no data'}`);
+      const parts = Object.keys(rt.watchers).map((key) => `${storeName(rt.watches[key] ? rt.watches[key].storeId : key)}: ${(rt.status[key] && rt.status[key].state) || 'no data'}`);
       alert('heartbeat', 'PS5 Pro watcher is running', `${settings.mode} mode. ${parts.join(', ')}`);
     }
   });

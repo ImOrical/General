@@ -12,7 +12,7 @@ function shell(title, body, script = '') {
 const ADD_SCRIPT = (sel) => `
   const btn = document.querySelector(${JSON.stringify(sel)});
   if (btn) btn.addEventListener('click', async () => {
-    const j = await (await fetch('/api/add', { method: 'POST' })).json();
+    const j = await (await fetch('/api/add' + location.search, { method: 'POST' })).json();
     if (j.wait) {
       const label = btn.textContent;
       btn.disabled = true; btn.textContent = 'Please Wait...';
@@ -130,7 +130,11 @@ const STORES = {
           ${st.seller ? `<div data-test="targetPlusExtraInfoSection">Sold and shipped by ${st.seller}</div>` : ''}
           <div data-test="flexible-fulfillment">${st.inStock ? '<button data-test="shippingButton">Add to cart</button>' : '<button data-test="shippingButton" disabled>Out of stock</button>'}</div>
           <div id="msg"></div></main>`,
-        ADD_SCRIPT('button[data-test="shippingButton"]')
+        ADD_SCRIPT('button[data-test="shippingButton"]') + `
+        // Like the real page: ask for this product's stock (and a recommended
+        // product's), and read the answers.
+        fetch('/redsky_aggregations/v1/web/pdp_fulfillment_v1?key=9f36aeafbe&tcin=93620188&store_id=1234').then((r) => r.json());
+        fetch('/redsky_aggregations/v1/web/pdp_fulfillment_v1?key=9f36aeafbe&tcin=11112222&store_id=1234').then((r) => r.json());`
       ),
     cartButton: '<button data-test="checkout-button" onclick="location.href=\'/checkout\'">Check out</button>',
     placeButton: '<button data-test="placeOrderButton">Place your order</button>',
@@ -178,11 +182,20 @@ function freshStoreState() {
     logins: [],
     adds: 0,
     pdpHits: 0,
+    apiHits: 0,
+    pickupInStock: false,
+    altInStock: false, // Best Buy's second listing (SKU 6609999)
+    cartViewed: false,
   };
 }
 
 function createServer({ key, cert, port = 443 }) {
-  const state = { stores: {}, orders: [], ntfy: [] };
+  const state = { stores: {}, orders: [], ntfy: [], subs: {} };
+  // Push a message to everyone listening on an ntfy topic (GET /topic/json).
+  state.publish = (topic, message) => {
+    const line = JSON.stringify({ event: 'message', topic, message }) + '\n';
+    for (const res of state.subs[topic] || []) res.write(line);
+  };
   for (const s of Object.values(STORES)) state.stores[s.id] = freshStoreState();
 
   const server = https.createServer({ key, cert }, (req, res) => {
@@ -205,7 +218,17 @@ function createServer({ key, cert, port = 443 }) {
       };
 
       if (host === 'ntfy.sh') {
-        state.ntfy.push({ topic: url.pathname.slice(1), title: req.headers.title || '', priority: req.headers.priority, body });
+        const m = url.pathname.match(/^\/([^/]+)\/json$/);
+        if (m && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+          res.write(JSON.stringify({ event: 'open', topic: m[1] }) + '\n');
+          (state.subs[m[1]] = state.subs[m[1]] || []).push(res);
+          res.on('close', () => (state.subs[m[1]] = state.subs[m[1]].filter((r) => r !== res)));
+          return;
+        }
+        const topic = url.pathname.slice(1);
+        state.ntfy.push({ topic, title: req.headers.title || '', priority: req.headers.priority, body });
+        state.publish(topic, body);
         return json({ id: String(state.ntfy.length) });
       }
       const def = STORES[host];
@@ -231,12 +254,39 @@ function createServer({ key, cert, port = 443 }) {
       if (p === '/payment/frame') return send(200, shell('Card', '<label>Security code <input autocomplete="cc-csc" name="cvv"></label>'));
       if (p === def.checkout && needsLogin) return redirect(`${def.signin}?return=${encodeURIComponent(p)}`);
 
-      if (p === def.pdp) {
+      const alt = def.id === 'bestbuy' && url.searchParams.get('skuId') === '6609999';
+      const view = alt ? { ...st, inStock: st.altInStock } : st;
+      if (p === def.pdp || (def.id === 'bestbuy' && p === '/site/6609999.p')) {
         st.pdpHits++;
-        return send(200, def.pdpHtml(st));
+        return send(200, def.pdpHtml(view));
       }
+      // Best Buy's small stock lookup.
+      if (p === '/button-state/api/v5/button-state') {
+        st.apiHits++;
+        const sku = url.searchParams.get('skus');
+        const inStock = sku === '6609999' ? st.altInStock : st.inStock;
+        return json([{ skuId: sku, buttonState: inStock ? 'ADD_TO_CART' : 'SOLD_OUT', displayText: inStock ? 'Add to Cart' : 'Sold Out' }]);
+      }
+      // Target's stock request (the page calls it; the extension learns it).
+      if (p === '/redsky_aggregations/v1/web/pdp_fulfillment_v1') {
+        if (url.searchParams.get('tcin') === '93620188') st.apiHits++;
+        const mine = url.searchParams.get('tcin') === '93620188';
+        return json({
+          data: {
+            product: {
+              tcin: url.searchParams.get('tcin'),
+              fulfillment: {
+                store_options: [{ order_pickup: { availability_status: st.pickupInStock || !mine ? 'IN_STOCK' : 'OUT_OF_STOCK' } }],
+                shipping_options: { availability_status: mine && st.inStock ? 'IN_STOCK' : mine ? 'OUT_OF_STOCK' : 'IN_STOCK' },
+              },
+            },
+          },
+        });
+      }
+      // Walmart won't open checkout until you've been through the cart.
+      if (def.id === 'walmart' && p === '/checkout') return redirect(st.cartViewed ? def.checkout : def.cart);
       if (p === '/api/add' && req.method === 'POST') {
-        if (!st.inStock) return json({ ok: false, error: 'Sold out' });
+        if (!view.inStock) return json({ ok: false, error: 'Sold out' });
         if (st.pleaseWaitMs && !st.waited) {
           st.waited = true;
           return json({ wait: st.pleaseWaitMs });
@@ -245,7 +295,10 @@ function createServer({ key, cert, port = 443 }) {
         st.cart.push({ name: PRODUCT, price: st.price });
         return json({ ok: true });
       }
-      if (p === def.cart) return send(200, shell('Cart', cartBody(st, def.cartButton)));
+      if (p === def.cart) {
+        st.cartViewed = true;
+        return send(200, shell('Cart', cartBody(st, def.cartButton)));
+      }
       if (p === def.checkout) {
         const inner = checkoutBody(st, def.placeButton);
         return send(200, inner == null ? CAPTCHA : shell('Checkout', inner, PLACE_SCRIPT(def.placeSel, def.thanks)));

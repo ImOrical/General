@@ -41,7 +41,7 @@ If something looks off, for example in stock but the seller can't be confirmed, 
 4. **Sign in to every store in this Chrome profile.** For each one: tick *keep me signed in*, save your **shipping address** and **card**, and **empty the cart**.
 5. **Fill in the vault.** Under *Logins & card (encrypted)*, enter each store's email and password and your card's CVV, choose a passphrase, and click **Encrypt & save**. Then click **Check sign-ins now**: the *Signed in* column should say *Yes* for every store. If a store sends a one-time code during that check, enter it once in the tab that stays open. Most stores then remember this browser.
 6. **Remote access for CAPTCHAs (recommended).** Install [Chrome Remote Desktop](https://remotedesktop.google.com/access) on the PC and the Chrome Remote Desktop app on your phone. Then set *"Needs you" alerts open* to `https://remotedesktop.google.com/access`.
-7. **Check the product links.**
+7. **Check the product links.** To watch several listings at one store (for example a second PS5 Pro SKU), paste them all into that store's box, separated by spaces.
    - **Amazon:** paste the PS5 Pro listing that says *Ships from Amazon.com, Sold by Amazon.com*.
    - **Walmart:** the built-in link is a best guess. Open it and confirm it says *Sold and shipped by Walmart.com*. If it doesn't, paste the right one.
    - The others are built in. Leave the box blank to use them.
@@ -56,11 +56,28 @@ Keep **HotStock** running on your phone as a second safety net.
 
 ## How fast it is
 
-Each store gets a light check every **4 seconds**: the page HTML is fetched quietly and read without rendering. Every **40 seconds** the page fully reloads. Timing is randomized so the checks don't look robotic. If a quick check sees stock, the page reloads straight away to confirm, then checkout starts. The page also watches itself, so if the store flips the button to *Add to Cart* while the page is open, it reacts within half a second.
+Four layers, fastest first.
 
-In the end-to-end test against local fake stores, it went from **restock to placed order in 2.0 seconds**. On real sites expect a few more seconds, because each page load takes 1–3 seconds over the internet.
+1. **Outside alerts** (fastest, if you set them up). Restock services like HotStock run many monitors at once and often know first. Forward their alerts to the *Listen on ntfy topic* box and the extension checks that store immediately, then buys if it's real. In testing, outside alert to placed order took **1.0 second**. Setup is under [Outside alerts](#outside-alerts-optional-but-fastest).
+2. **The store's own stock request.** Product pages ask the store "is this in stock?" with a tiny request, a few kilobytes instead of a whole page. The extension spots that request while the page loads and repeats it every **2.5 seconds**. Best Buy's stock lookup and Amazon's seller list are built in. The *Speed* column shows **API** when a store uses this.
+3. **Page quick checks** when no stock request was found: the page HTML every **4 seconds**, read without rendering. A full reload happens every **40 seconds**, and the open page reacts within half a second if the store flips its button.
+4. **Hot mode.** After any sign of a drop (a queue opening, stock showing anywhere, an outside alert), every interval is halved for 15 minutes, because restocks often hit several stores at once. During *warm hours* (default weekdays 7 a.m.–noon Eastern, a guess you can edit) intervals are three-quarters. You can also press **Go hot 30 min** yourself, for example when PlayStation announces a drop.
 
-Checking faster than every 3 seconds per store usually gets you rate-limited. If a store pushes back, the extension slows down that store on its own and tells you.
+Once stock is confirmed, checkout goes **straight to the checkout page**, skipping the cart, and falls back to the cart if a store insists. Timing is randomized throughout so the checks don't look robotic.
+
+**Measured on the fake stores** (1-second checks): restock to alert in 1.8 seconds using the stock lookup alone. Restock to placed order in 1.8 seconds. Outside alert to placed order in 1.0 second. On real sites add network time and 1–3 seconds per page load.
+
+**Limits.** Checks never go faster than once a second per listing. If a store pushes back, that store slows down on its own and you're told. If a quick check says "in stock" three times and the page disagrees, that quick check is ignored for 30 minutes. Going faster would take pools of proxy addresses or many accounts, which this deliberately doesn't do.
+
+### Outside alerts (optional, but fastest)
+
+1. On the dashboard, click **Generate** next to *Listen on ntfy topic*, then **Save settings**. Use a different topic from your phone-alert topic.
+2. Forward restock alerts to `https://ntfy.sh/<that topic>`:
+   - **Android + HotStock:** install **MacroDroid** (free). Create a macro with trigger *Notification received*, app *HotStock*. Add the action *HTTP request*, method **POST**, URL `https://ntfy.sh/<topic>`, body `[notification_title] [notification_text]`.
+   - **iPhone:** iOS doesn't let one app act on another app's notifications, so HotStock can't be forwarded automatically. Anything else that can send a web request works, such as a Discord bot, IFTTT or Zapier.
+3. Test it: `curl -d "PS5 Pro in stock at Best Buy" https://ntfy.sh/<topic>` while watching. The Activity log should say *Outside alert, checking Best Buy now*.
+
+An alert never buys anything by itself. It only makes the extension check right away. Alerts that don't mention a PS5 Pro are ignored, unless you tick the box that turns that filter off.
 
 ## Modes and alerts
 
@@ -92,7 +109,7 @@ To fix these quickly, run [Claude Code](https://claude.ai/code) on the PC in thi
 
 ```bash
 npm install
-npm test           # unit tests: page reading, price/seller/condition rules, checkout guards, sign-in forms, vault encryption
+npm test           # unit tests: page reading, price/seller/condition rules, checkout guards, sign-in forms, vault, stock requests, hot hours, outside alerts
 npm run test:e2e   # loads the real extension in Chromium against fake stores (needs Playwright + port 443)
 ```
 
@@ -111,6 +128,11 @@ The end-to-end suite covers:
 - a locked vault
 - the sign-in check signing back in ahead of a drop
 - the vault's save, lock and unlock on the dashboard
+- catching a restock from Best Buy's stock lookup without a page reload
+- learning Target's own stock request (and ignoring pickup-only stock and a recommended product)
+- an outside alert causing an immediate check and purchase
+- two listings at one store
+- the checkout shortcut, including Walmart bouncing it to the cart
 
 The fake stores copy the markup the extension expects, so they prove the engine works, not that the real sites still match. That's what Practice mode is for.
 

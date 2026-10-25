@@ -18,6 +18,9 @@
     psdirect: {
       name: 'PlayStation Direct',
       hosts: ['direct.playstation.com'],
+      checkoutUrl: 'https://direct.playstation.com/en-us/checkout',
+      // Quick checks: the page's own stock request, learned while the page loads.
+      fast: { learn: ['api\\.direct\\.playstation\\.com/.*(productList|stock|inventory)', 'direct\\.playstation\\.com/.*/(stock|availability)'] },
       // Signed-in check for the session keeper. PS Direct has no simple account
       // page, so the cart is used and a visible "Sign In" link means signed out.
       accountUrl: 'https://direct.playstation.com/en-us/cart',
@@ -37,7 +40,7 @@
         cartUrl: 'https://direct.playstation.com/en-us/cart',
         steps: [
           { id: 'signin', url: 'my\\.account\\.sony\\.com|/signin|/login', signin: true, needsUser: 'Sign in to your PlayStation account' },
-          { id: 'pdp', url: 'direct\\.playstation\\.com/[a-z-]+/buy-', click: { selectors: ['button.add-to-cart:not(.hide)'], text: '^add to cart$', scope: ['.productHero-desktop', 'main'] }, waitText: 'please wait|adding', after: { navigate: 'cart', waitFor: 'added to (your )?cart|view cart|cart \\(1\\)', timeoutMs: 4000 } },
+          { id: 'pdp', url: 'direct\\.playstation\\.com/[a-z-]+/buy-', click: { selectors: ['button.add-to-cart:not(.hide)'], text: '^add to cart$', scope: ['.productHero-desktop', 'main'] }, waitText: 'please wait|adding', after: { navigate: 'checkout', waitFor: 'added to (your )?cart|view cart|cart \\(1\\)', timeoutMs: 4000 } },
           { id: 'cart', url: 'direct\\.playstation\\.com/[a-z-]+/cart', click: { selectors: ['button.checkout-btn', 'a.checkout-btn'], text: '^(proceed to )?check ?out$' } },
           { id: 'place', url: 'direct\\.playstation\\.com/[a-z-]+/checkout', final: true, click: { selectors: ['button.place-order', 'button[name="placeOrder"]'], text: '^place (your )?order$' }, cvv: ['input[name*="cvv" i]', 'input[id*="cvv" i]', 'input[name*="securityCode" i]'] },
           { id: 'continue', url: 'direct\\.playstation\\.com/[a-z-]+/checkout', click: { selectors: [], text: '^(continue|next|continue to (payment|review))$' } },
@@ -49,6 +52,12 @@
     bestbuy: {
       name: 'Best Buy',
       hosts: ['www.bestbuy.com'],
+      checkoutUrl: 'https://www.bestbuy.com/checkout/r/fast-track',
+      fast: {
+        learn: ['/button-state/api/', '/fulfillment/[^?]*(availability|options)', '/api/[^?]*availability'],
+        idFrom: 'skuId=(\\d+)|/sku/(\\d+)|/(\\d{6,9})\\.p',
+        template: 'https://www.bestbuy.com/button-state/api/v5/button-state?skus={id}&context=pdp&source=buttonView',
+      },
       accountUrl: 'https://www.bestbuy.com/site/customer/myaccount',
       signin: { email: ['#fld-e'], password: ['#fld-p1'], submit: ['button.cia-form__controls__submit'] },
       productUrl: 'https://www.bestbuy.com/site/6601524.p?skuId=6601524',
@@ -67,7 +76,7 @@
         cartUrl: 'https://www.bestbuy.com/cart',
         steps: [
           { id: 'signin', url: 'bestbuy\\.com/identity/', signin: true, needsUser: 'Sign in to Best Buy' },
-          { id: 'pdp', url: 'bestbuy\\.com/(site|product)/', click: { selectors: ['button.add-to-cart-button', 'button[data-test-id="add-to-cart"]'], text: '^add to cart$', scope: ['.fulfillment-add-to-cart-button', '[data-testid="fulfillment-add-to-cart-button"]', 'main'] }, waitText: 'please wait', after: { navigate: 'cart', waitFor: 'added to cart|go to cart|cart \\(1\\)', timeoutMs: 4000 } },
+          { id: 'pdp', url: 'bestbuy\\.com/(site|product)/', click: { selectors: ['button.add-to-cart-button', 'button[data-test-id="add-to-cart"]'], text: '^add to cart$', scope: ['.fulfillment-add-to-cart-button', '[data-testid="fulfillment-add-to-cart-button"]', 'main'] }, waitText: 'please wait', after: { navigate: 'checkout', waitFor: 'added to cart|go to cart|cart \\(1\\)', timeoutMs: 4000 } },
           { id: 'cart', url: 'bestbuy\\.com/cart', click: { selectors: ['.checkout-buttons__checkout button', 'button[data-track="Checkout - Top"]'], text: '^check ?out$' } },
           { id: 'place', url: 'bestbuy\\.com/checkout', final: true, click: { selectors: ['.button__fast-track', 'button[data-track="Place your Order - Contact Card"]'], text: '^place (your )?order$' }, cvv: ['#cvv', 'input[name="cvv"]', '#credit-card-cvv', 'input[id*="cvv" i]'] },
           { id: 'continue', url: 'bestbuy\\.com/checkout', click: { selectors: [], text: '^continue to (payment information|schedule|review)' } },
@@ -79,6 +88,8 @@
     target: {
       name: 'Target',
       hosts: ['www.target.com'],
+      checkoutUrl: 'https://www.target.com/checkout',
+      fast: { learn: ['redsky_aggregations/v1/web/[a-z_]*fulfillment'], idFrom: '/A-(\\d+)' },
       accountUrl: 'https://www.target.com/account',
       signin: { email: ['#username'], password: ['#password'], submit: ['#login'] },
       productUrl: 'https://www.target.com/p/playstation-5-pro-console/-/A-93620188',
@@ -97,7 +108,7 @@
         cartUrl: 'https://www.target.com/cart',
         steps: [
           { id: 'signin', url: 'target\\.com/(login|account/signin)|login\\.target\\.com', signin: true, needsUser: 'Sign in to Target' },
-          { id: 'pdp', url: 'target\\.com/p/', click: { selectors: ['button[data-test="shipItButton"]', 'button[data-test="shippingButton"]', 'button[id^="addToCartButton"]'], text: '^(add to cart|ship it)$', scope: ['[data-test="flexible-fulfillment"]', 'main'] }, after: { navigate: 'cart', waitFor: 'added to cart|view cart', timeoutMs: 4000 } },
+          { id: 'pdp', url: 'target\\.com/p/', click: { selectors: ['button[data-test="shipItButton"]', 'button[data-test="shippingButton"]', 'button[id^="addToCartButton"]'], text: '^(add to cart|ship it)$', scope: ['[data-test="flexible-fulfillment"]', 'main'] }, after: { navigate: 'checkout', waitFor: 'added to cart|view cart', timeoutMs: 4000 } },
           { id: 'cart', url: 'target\\.com/cart', click: { selectors: ['button[data-test="checkout-button"]'], text: '^(check ?out|i\'m ready to check ?out)$' } },
           { id: 'place', url: 'target\\.com/checkout', final: true, click: { selectors: ['button[data-test="placeOrderButton"]'], text: '^place (your )?order$' }, cvv: ['#creditCardInput-cvv', 'input[name="cvv"]', 'input[id*="cvv" i]'] },
           { id: 'continue', url: 'target\\.com/checkout', click: { selectors: ['button[data-test="save-and-continue-button"]'], text: '^save (and|&) continue$' } },
@@ -109,6 +120,8 @@
     walmart: {
       name: 'Walmart',
       hosts: ['www.walmart.com'],
+      checkoutUrl: 'https://www.walmart.com/checkout',
+      fast: { learn: ['/orchestra/(pdp|home)/graphql/[^?]*(ip|item|product)'], idFrom: '/ip/(?:[^/]+/)?(\\d+)' },
       accountUrl: 'https://www.walmart.com/account',
       signin: { email: [], password: [], submit: [] },
       // Check this is the "Sold and shipped by Walmart.com" listing before relying on it.
@@ -130,7 +143,7 @@
         cartUrl: 'https://www.walmart.com/cart',
         steps: [
           { id: 'signin', url: '(identity\\.)?walmart\\.com/account/login', signin: true, needsUser: 'Sign in to Walmart' },
-          { id: 'pdp', url: 'walmart\\.com/ip/', click: { selectors: ['button[data-automation-id="atc"]', '[data-dca-name="ItemBuyBoxAddToCartButton"]'], text: '^add to cart$', scope: ['[data-testid="add-to-cart-section"]', 'main'] }, after: { navigate: 'cart', waitFor: 'added to cart|view cart|cart \\(1\\)', timeoutMs: 4000 } },
+          { id: 'pdp', url: 'walmart\\.com/ip/', click: { selectors: ['button[data-automation-id="atc"]', '[data-dca-name="ItemBuyBoxAddToCartButton"]'], text: '^add to cart$', scope: ['[data-testid="add-to-cart-section"]', 'main'] }, after: { navigate: 'checkout', waitFor: 'added to cart|view cart|cart \\(1\\)', timeoutMs: 4000 } },
           { id: 'cart', url: 'walmart\\.com/cart', click: { selectors: ['button[data-automation-id="checkout"]'], text: '^continue to checkout$' } },
           { id: 'place', url: 'walmart\\.com/checkout', final: true, click: { selectors: ['button[data-automation-id="place-order-button"]'], text: '^place order$' }, cvv: ['input[name="cvv"]', 'input[id*="cvv" i]'] },
           { id: 'continue', url: 'walmart\\.com/checkout', click: { selectors: [], text: '^(continue|review order)$' } },
@@ -142,6 +155,14 @@
     amazon: {
       name: 'Amazon',
       hosts: ['www.amazon.com'],
+      checkoutUrl: 'https://www.amazon.com/gp/buy/spc/handlers/display.html?hasWorkingJavascript=1',
+      fast: {
+        idFrom: '/dp/([A-Z0-9]{10})|/gp/product/([A-Z0-9]{10})',
+        // The "other sellers" panel: small, and lists Amazon's own offer even when
+        // a third-party seller holds the buy box.
+        template: 'https://www.amazon.com/gp/product/ajax/aodAjaxMain/?asin={id}&pc=dp&experienceId=aodAjaxMain&isAod=1&experience=aod&ref=dp_aod_NEW_mbc',
+        templateFormat: 'aod',
+      },
       accountUrl: 'https://www.amazon.com/gp/css/order-history',
       signin: { email: ['#ap_email', '#ap_email_login'], password: ['#ap_password'], submit: ['#signInSubmit', 'input#continue', '#continue'] },
       // Paste the listing that says "Ships from Amazon.com, Sold by Amazon.com".
@@ -161,7 +182,7 @@
         cartUrl: 'https://www.amazon.com/gp/cart/view.html',
         steps: [
           { id: 'signin', url: 'amazon\\.com/ap/(signin|mfa|cvf)', signin: true, needsUser: 'Sign in to Amazon' },
-          { id: 'pdp', url: 'amazon\\.com/(.*/)?(dp|gp/product)/', click: { selectors: ['#add-to-cart-button'], text: '^add to cart$', scope: ['#desktop_buybox', '#buybox', '#rightCol'] }, after: { navigate: 'cart', waitFor: 'added to cart|proceed to checkout|no thanks', timeoutMs: 4000 } },
+          { id: 'pdp', url: 'amazon\\.com/(.*/)?(dp|gp/product)/', click: { selectors: ['#add-to-cart-button'], text: '^add to cart$', scope: ['#desktop_buybox', '#buybox', '#rightCol'] }, after: { navigate: 'checkout', waitFor: 'added to cart|proceed to checkout|no thanks', timeoutMs: 4000 } },
           { id: 'cart', url: 'amazon\\.com/(gp/cart|cart)', click: { selectors: ['input[name="proceedToRetailCheckout"]', '#sc-buy-box-ptc-button input'], text: '^proceed to checkout' } },
           { id: 'place', url: 'amazon\\.com/(gp/buy|checkout)', final: true, click: { selectors: ['#submitOrderButtonId input', 'input[name="placeYourOrder1"]', '#placeOrder', '#bottomSubmitOrderButtonId input'], text: '^place your order$' }, cvv: [] },
           { id: 'continue', url: 'amazon\\.com/(gp/buy|checkout)', click: { selectors: ['input[data-testid="Address_selectShipToThisAddress"]', '#shipToThisAddressButton input'], text: '^(use this (address|payment method)|deliver to this address|continue)$' } },
@@ -173,6 +194,8 @@
     gamestop: {
       name: 'GameStop',
       hosts: ['www.gamestop.com'],
+      checkoutUrl: 'https://www.gamestop.com/checkout/',
+      fast: { learn: ['Product-Variation', '/availability'], idFrom: '/(\\d{6,9})\\.html' },
       accountUrl: 'https://www.gamestop.com/account/',
       signin: { email: ['#login-form-email'], password: ['#login-form-password'], submit: [] },
       productUrl: 'https://www.gamestop.com/consoles-hardware/playstation-5/consoles/products/sony-playstation-5-pro-console/20015604.html?condition=New',
@@ -191,7 +214,7 @@
         cartUrl: 'https://www.gamestop.com/cart/',
         steps: [
           { id: 'signin', url: 'gamestop\\.com/(login|account/login)', signin: true, needsUser: 'Sign in to GameStop' },
-          { id: 'pdp', url: 'gamestop\\.com/.*/products/', click: { selectors: ['button.add-to-cart'], text: '^add to cart$', scope: ['.primary-details-row', '.add-to-cart-buttons', 'main'] }, after: { navigate: 'cart', waitFor: 'added to cart|view cart', timeoutMs: 4000 } },
+          { id: 'pdp', url: 'gamestop\\.com/.*/products/', click: { selectors: ['button.add-to-cart'], text: '^add to cart$', scope: ['.primary-details-row', '.add-to-cart-buttons', 'main'] }, after: { navigate: 'checkout', waitFor: 'added to cart|view cart', timeoutMs: 4000 } },
           { id: 'cart', url: 'gamestop\\.com/cart', click: { selectors: ['a.checkout-btn', 'button.checkout-btn'], text: '^(proceed to )?check ?out$' } },
           { id: 'place', url: 'gamestop\\.com/(checkout|spcheckout)', final: true, click: { selectors: ['button.place-order', 'button[value="place-order"]'], text: '^place order$' }, cvv: ['input[name*="securityCode" i]', 'input#saved-payment-security-code', 'input[id*="cvv" i]'] },
           { id: 'continue', url: 'gamestop\\.com/(checkout|spcheckout)', click: { selectors: [], text: '^(continue|next: payment|next: review)' } },
@@ -208,8 +231,21 @@
     // Below this, the "PS5 Pro" we matched is probably an accessory or a pricing glitch:
     // alert, but don't auto-buy.
     minPrice: 600,
+    // Seconds between checks per listing: the store's small stock request
+    // (when one was found) and the whole product page.
+    apiIntervalSec: 2.5,
     fetchIntervalSec: 4,
     reloadIntervalSec: 40,
+    // Hot: right after any sign of a drop. Warm: during the hot windows below.
+    // Intervals are multiplied by these (never under 1 second).
+    hotFactor: 0.5,
+    warmFactor: 0.75,
+    hotMinutes: 15,
+    // Eastern time. A starting guess at when restocks cluster; edit freely.
+    hotWindows: 'Mon-Fri 07:00-12:00',
+    // Outside restock alerts (e.g. HotStock forwarded from your phone) posted to
+    // this ntfy topic make the extension check that store immediately.
+    trigger: { ntfyTopic: '', anyProduct: false },
     jitterPct: 30,
     cacheBust: true,
     // Re-open the watcher automatically when Chrome starts.
@@ -277,13 +313,22 @@
     return deepMerge(DEFAULT_SETTINGS, saved || {});
   }
 
+  // The listings to watch at a store: the links you entered (space- or
+  // comma-separated, so one store can have several listings), else the built-in one.
+  function watchUrls(id, settings) {
+    const typed = String(((settings.stores || {})[id] || {}).productUrl || '')
+      .split(/[\s,]+/)
+      .filter((u) => /^https?:\/\//i.test(u));
+    if (typed.length) return typed;
+    return STORES[id] && STORES[id].productUrl ? [STORES[id].productUrl] : [];
+  }
+
   // The store definition with the user's overrides and product URL applied.
   function resolveStore(id, settings) {
     const base = STORES[id];
     if (!base) return null;
     const merged = deepMerge(base, (settings.overrides || {})[id] || {});
-    const userUrl = ((settings.stores || {})[id] || {}).productUrl;
-    if (userUrl) merged.productUrl = userUrl;
+    merged.productUrl = watchUrls(id, settings)[0] || '';
     merged.id = id;
     return merged;
   }
@@ -299,7 +344,7 @@
     return new RegExp(src, flags === undefined ? 'i' : flags);
   }
 
-  const api = { STORES, DEFAULT_SETTINGS, MATCH, deepMerge, resolveSettings, resolveStore, storeForHost, re };
+  const api = { STORES, DEFAULT_SETTINGS, MATCH, deepMerge, resolveSettings, resolveStore, watchUrls, storeForHost, re };
   root.PS5Config = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

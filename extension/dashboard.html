@@ -18,6 +18,8 @@
         <button data-mode="dryrun" role="radio">Dry run</button>
         <button data-mode="armed" role="radio">Armed</button>
       </div>
+      <span id="speedPill" class="pill neutral" aria-live="polite">Stopped</span>
+      <button id="goHot" class="small">Go hot 30 min</button>
       <button id="startStop" class="primary">Start</button>
     </div>
   </header>
@@ -28,11 +30,11 @@
 
     <section class="card">
       <h2>Stores</h2>
-      <p class="help">Leave a link blank to use the built-in one. Run <b>Practice</b> on each store before arming: it checks out a cheap item you choose and stops before Place Order.</p>
+      <p class="help">Leave a link blank to use the built-in one, or paste several separated by spaces to watch more than one listing. Run <b>Practice</b> on each store before arming: it checks out a cheap item you choose and stops before Place Order.</p>
       <div class="table-wrap">
         <table id="stores">
           <thead>
-            <tr><th>On</th><th>Store</th><th>Product link</th><th>Status</th><th>Price</th><th>Seller</th><th>Checked</th><th>Signed in</th><th></th></tr>
+            <tr><th>On</th><th>Store</th><th>Product link</th><th>Status</th><th>Price</th><th>Seller</th><th>Checked</th><th>Speed</th><th>Signed in</th><th></th></tr>
           </thead>
           <tbody></tbody>
         </table>
@@ -62,11 +64,14 @@
         <label class="check"><input id="autoStart" type="checkbox"> Start watching automatically when Chrome opens</label>
         <label>Check sign-ins every (hours, 0 = never) <input id="keeperHours" type="number" min="0" step="1"></label>
         <h3>Speed</h3>
-        <label>Quick check every (seconds) <input id="fetchIntervalSec" type="number" min="0" step="1"></label>
+        <label>Store stock request every (seconds) <input id="apiIntervalSec" type="number" min="0" step="0.5"></label>
+        <label>Page quick check every (seconds) <input id="fetchIntervalSec" type="number" min="0" step="0.5"></label>
         <label>Full page reload every (seconds) <input id="reloadIntervalSec" type="number" min="5" step="1"></label>
         <label>Random timing spread (%) <input id="jitterPct" type="number" min="0" max="80" step="5"></label>
         <label class="check"><input id="cacheBust" type="checkbox"> Bypass store caches on quick checks</label>
-        <p class="help">Under 3 seconds per store tends to get you rate-limited, and a blocked watcher is slower than a patient one. It backs off automatically if a store pushes back.</p>
+        <p class="help">It uses the store's own small stock request when it can find one (a few KB, so it can check often), and the page otherwise. Hot mode halves these for a while after any sign of a drop; warm hours use three-quarters. It never goes under 1 second and backs off on its own if a store pushes back.</p>
+        <label>Stay hot for (minutes) <input id="hotMinutes" type="number" min="1" step="1"></label>
+        <label>Warm hours, Eastern time <input id="hotWindows" type="text" spellcheck="false" placeholder="Mon-Fri 07:00-12:00; Sat 09:00-11:00"></label>
       </section>
 
       <section class="card">
@@ -80,6 +85,10 @@
         <label>Discord webhook URL <input id="discordWebhook" type="url" spellcheck="false"></label>
         <label>"Needs you" alerts open <input id="needsYouLink" type="url" spellcheck="false" placeholder="https://remotedesktop.google.com/access"></label>
         <p class="help">Set this to Chrome Remote Desktop and tapping a CAPTCHA or code alert on your phone opens this PC, so you can solve it from anywhere in seconds.</p>
+        <h3>Outside alerts (makes it faster)</h3>
+        <label>Listen on ntfy topic <span class="row"><input id="triggerTopic" type="text" spellcheck="false"><button id="genTrigger" class="small">Generate</button></span></label>
+        <p class="help">Anything posted to this topic, like a forwarded HotStock alert ("PS5 Pro in stock at Target"), makes it check that store immediately and go hot. It never buys from an alert alone. Use a different topic from the one above. <span id="triggerStatus"></span></p>
+        <label class="check"><input id="triggerAny" type="checkbox"> React even if the alert doesn't mention "PS5 Pro"</label>
         <label class="check"><input id="desktop" type="checkbox"> Desktop notifications</label>
         <label class="check"><input id="siren" type="checkbox"> Siren sound on this PC</label>
         <div class="row"><button id="save" class="primary">Save settings</button><button id="testAlert">Send test alert</button></div>

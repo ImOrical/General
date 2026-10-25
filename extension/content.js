@@ -8,6 +8,7 @@
   const C = PS5Config;
   const D = PS5Detect;
   const F = PS5Flow;
+  const FL = PS5Fast;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const send = (msg) => chrome.runtime.sendMessage(msg).catch(() => null);
 
@@ -20,6 +21,7 @@
   let role = 'none';
   let lastLiveState = null;
   let fetching = false;
+  let lanes = [];
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'fetchCheck' && role === 'watch') fetchCheck();
@@ -40,6 +42,7 @@
   // ---------------------------------------------------------------- watching
 
   async function watch() {
+    setupLanes();
     // Give client-side rendering a moment to settle on a definite answer.
     let res;
     for (let i = 0; i < 20; i++) {
@@ -47,6 +50,7 @@
       if (res.state !== 'unknown') break;
       await sleep(400);
     }
+    res.lane = currentLane().kind;
     await report(res);
 
     // Catch the page flipping to in stock on its own (some stores poll stock in-page).
@@ -79,25 +83,80 @@
     }
   }
 
-  // Cheap check between full reloads: fetch the same page's HTML and read it
-  // without rendering. If it says in stock, the background reloads to confirm.
+  // Quick-check lanes, cheapest first:
+  //   learned:  the stock request this page itself just made (a few KB of JSON)
+  //   template: a known small stock endpoint for this store (Best Buy, Amazon)
+  //   html:     the whole product page, read without rendering
+  // A lane that keeps returning nothing useful is skipped for the rest of this page.
+  function setupLanes() {
+    lanes = [];
+    const useApi = !(ctx.settings && ctx.settings.distrustApi);
+    if (useApi) {
+      const learn = (url) => {
+        if (!FL.isLearnable(ctx.store, location.href, url)) return;
+        const lane = lanes.find((l) => l.kind === 'learned');
+        if (lane) lane.url = url;
+        else lanes.unshift({ kind: 'learned', url, format: 'json', strikes: 0 });
+      };
+      try {
+        for (const e of performance.getEntriesByType('resource')) learn(e.name);
+        new PerformanceObserver((list) => list.getEntries().forEach((e) => learn(e.name))).observe({ type: 'resource' });
+      } catch (_) {
+        // No resource timing here; the other lanes still work.
+      }
+      const t = FL.templateUrl(ctx.store, location.href);
+      if (t) lanes.push({ kind: 'template', url: t, format: (ctx.store.fast && ctx.store.fast.templateFormat) || 'json', strikes: 0 });
+    }
+    lanes.push({ kind: 'html', url: null, format: 'html', strikes: 0 });
+  }
+
+  function currentLane() {
+    return lanes.find((l) => l.strikes < 3) || lanes[lanes.length - 1];
+  }
+
   async function fetchCheck() {
     if (fetching) return;
     fetching = true;
+    const lane = currentLane();
+    const t0 = performance.now();
+    const base = { at: Date.now(), url: location.href, lane: lane.kind, source: lane.kind === 'html' ? 'fetch' : 'api' };
     try {
-      const u = new URL(location.href);
-      if (ctx.settings && ctx.settings.cacheBust) u.searchParams.set('_ps5', Date.now().toString(36));
-      const resp = await fetch(u.toString(), { credentials: 'include', cache: 'no-store', redirect: 'follow' });
+      let url = lane.url || location.href;
+      if (lane.kind === 'html' && ctx.settings && ctx.settings.cacheBust) {
+        const u = new URL(url);
+        u.searchParams.set('_ps5', Date.now().toString(36));
+        url = u.toString();
+      }
+      const sameOrigin = new URL(url).origin === location.origin;
+      const resp = await fetch(url, { credentials: sameOrigin ? 'include' : 'omit', cache: 'no-store', redirect: 'follow' });
+      const rtt = Math.round(performance.now() - t0);
       if (resp.status === 403 || resp.status === 429 || resp.status === 503) {
-        await send({ type: 'status', result: { state: 'blocked', source: 'fetch', httpStatus: resp.status, at: Date.now(), url: location.href } });
+        lane.strikes++;
+        await send({ type: 'status', result: { ...base, state: 'blocked', httpStatus: resp.status, rtt } });
         return;
       }
-      const html = await resp.text();
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      const res = D.detect(doc, ctx.store, resp.url || location.href, { live: false });
+      let res;
+      if (lane.format === 'json') {
+        let json = null;
+        try {
+          json = await resp.json();
+        } catch (_) {
+          // Not JSON after all; counts as a miss for this lane.
+        }
+        res = { ...base, ...(json ? FL.parseStockJson(json) : { state: 'unknown' }) };
+      } else {
+        const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+        res =
+          lane.format === 'aod'
+            ? { ...base, ...FL.parseAod(doc, ctx.store, ctx.settings) }
+            : { ...D.detect(doc, ctx.store, resp.url || location.href, { live: false }), lane: 'html' };
+      }
+      lane.strikes = res.state === 'unknown' ? lane.strikes + 1 : 0;
+      res.rtt = rtt;
       await send({ type: 'status', result: res });
     } catch (e) {
-      await send({ type: 'status', result: { state: 'error', source: 'fetch', error: String(e), at: Date.now(), url: location.href } });
+      lane.strikes++;
+      await send({ type: 'status', result: { ...base, state: 'error', error: String(e), rtt: Math.round(performance.now() - t0) } });
     } finally {
       fetching = false;
     }
@@ -330,6 +389,7 @@
       }
       emptySince = 0;
       if (!steps.length) {
+        if (cc.viaDirect && Date.now() - idleSince > 5000) return fallBackToCart('unrecognized page');
         if (Date.now() - idleSince > 15000) return needsYou(`Checkout reached a page I don't recognize: ${url}`);
         await sleep(500);
         continue;
@@ -362,6 +422,7 @@
         }
       }
       if (!step) {
+        if (cc.viaDirect && Date.now() - idleSince > 5000) return fallBackToCart('no checkout button');
         if (Date.now() - idleSince > 20000) return needsYou(`Stuck on "${steps[0].id}": couldn't find the button`);
         await sleep(400);
         continue;
@@ -404,7 +465,15 @@
 
       if (step.after && step.after.navigate) {
         if ((await afterClick(step)) === 'wait') continue;
-        location.assign(step.after.navigate === 'cart' ? store.checkout.cartUrl : step.after.navigate);
+        const nav = step.after.navigate;
+        if (nav === 'checkout' && store.checkoutUrl) {
+          // Skip the cart page (one less page load). If the store bounces us,
+          // the cart step or the fallback below takes over.
+          await event('step', { step: 'straight to checkout', direct: true });
+          location.assign(store.checkoutUrl);
+        } else {
+          location.assign(nav === 'cart' || nav === 'checkout' ? store.checkout.cartUrl : nav);
+        }
         return null;
       }
       await sleep(1500);
@@ -412,11 +481,19 @@
     return needsYou('Checkout timed out on this page');
   }
 
+  // Going straight to checkout didn't land on a usable page: take the long way.
+  async function fallBackToCart(why) {
+    await event('step', { step: `checkout shortcut failed (${why}), going via cart`, direct: false });
+    location.assign(ctx.store.checkout.cartUrl);
+    return null;
+  }
+
   async function finalStep(step, found) {
     const store = ctx.store;
     const cc = ctx.checkout;
     const guard = F.finalGuard(document, store, cc);
     await event('guard', { subtotal: guard.subtotal, problems: guard.problems });
+    if (!guard.ok && cc.viaDirect) return fallBackToCart('order summary not ready');
     if (!guard.ok) return needsYou('Stopped before Place Order: ' + guard.problems.join('; '));
 
     // A CVV box inside an iframe is filled by that frame's own script; give it a moment.

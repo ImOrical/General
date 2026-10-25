@@ -124,3 +124,4 @@ details > summary h2 { display: inline; }
 .vault-grid input { width: 100%; }
 @media (max-width: 700px) { .vault-grid { grid-template-columns: 1fr; } }
 td.signin { white-space: nowrap; }
+td.speed { white-space: nowrap; font-variant-numeric: tabular-nums; }
