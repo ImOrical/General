@@ -1,0 +1,313 @@
+// Runs on every store page. Does nothing unless the background worker says this
+// tab is a watcher (report stock) or a checkout tab (click through to the order).
+(function () {
+  if (window.top !== window || window.__ps5Loaded) return;
+  window.__ps5Loaded = true;
+
+  const C = PS5Config;
+  const D = PS5Detect;
+  const F = PS5Flow;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const send = (msg) => chrome.runtime.sendMessage(msg).catch(() => null);
+
+  let ctx = null;
+  let role = 'none';
+  let lastLiveState = null;
+  let fetching = false;
+
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type === 'fetchCheck' && role === 'watch') fetchCheck();
+  });
+
+  init();
+
+  async function init() {
+    const reply = await send({ type: 'hello', url: location.href });
+    if (!reply || reply.role === 'none') return;
+    ctx = reply;
+    role = reply.role;
+    if (role === 'watch') watch();
+    else if (role === 'checkout') checkout();
+  }
+
+  // ---------------------------------------------------------------- watching
+
+  async function watch() {
+    // Give client-side rendering a moment to settle on a definite answer.
+    let res;
+    for (let i = 0; i < 20; i++) {
+      res = D.detect(document, ctx.store, location.href, { live: true });
+      if (res.state !== 'unknown') break;
+      await sleep(400);
+    }
+    await report(res);
+
+    // Catch the page flipping to in stock on its own (some stores poll stock in-page).
+    let pending = false;
+    const observer = new MutationObserver(() => {
+      if (pending || role !== 'watch') return;
+      pending = true;
+      setTimeout(async () => {
+        pending = false;
+        if (role !== 'watch') return;
+        const r = D.detect(document, ctx.store, location.href, { live: true });
+        if (r.state !== lastLiveState) await report(r);
+      }, 500);
+    });
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['disabled', 'class', 'aria-disabled', 'data-button-state'],
+    });
+  }
+
+  async function report(res) {
+    lastLiveState = res.state;
+    const reply = await send({ type: 'status', result: res });
+    if (reply && reply.go && role === 'watch') {
+      ctx = reply.ctx;
+      role = 'checkout';
+      checkout();
+    }
+  }
+
+  // Cheap check between full reloads: fetch the same page's HTML and read it
+  // without rendering. If it says in stock, the background reloads to confirm.
+  async function fetchCheck() {
+    if (fetching) return;
+    fetching = true;
+    try {
+      const u = new URL(location.href);
+      if (ctx.settings && ctx.settings.cacheBust) u.searchParams.set('_ps5', Date.now().toString(36));
+      const resp = await fetch(u.toString(), { credentials: 'include', cache: 'no-store', redirect: 'follow' });
+      if (resp.status === 403 || resp.status === 429 || resp.status === 503) {
+        await send({ type: 'status', result: { state: 'blocked', source: 'fetch', httpStatus: resp.status, at: Date.now(), url: location.href } });
+        return;
+      }
+      const html = await resp.text();
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const res = D.detect(doc, ctx.store, resp.url || location.href, { live: false });
+      await send({ type: 'status', result: res });
+    } catch (e) {
+      await send({ type: 'status', result: { state: 'error', source: 'fetch', error: String(e), at: Date.now(), url: location.href } });
+    } finally {
+      fetching = false;
+    }
+  }
+
+  // ---------------------------------------------------------------- checkout
+
+  function event(name, data = {}) {
+    return send({ type: 'checkout', event: name, url: location.href, ...data });
+  }
+
+  const askedFor = new Set();
+  function needsYou(reason) {
+    if (askedFor.has(reason)) return null;
+    askedFor.add(reason);
+    return event('needs_you', { reason });
+  }
+
+  function click(el) {
+    try {
+      el.scrollIntoView({ block: 'center' });
+    } catch (_) {
+      // Not all elements support scrollIntoView options; the click still works.
+    }
+    el.click();
+  }
+
+  // Sets an input the way a typing user would, so React/Vue forms notice.
+  function setInputValue(el, value) {
+    const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    el.focus();
+    desc.set.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.blur();
+  }
+
+  // After Add to Cart: 'added' once the page confirms it, 'wait' if the button
+  // went into a "Please Wait" queue state (don't leave the page), else 'timeout'.
+  async function afterClick(step) {
+    const added = step.after.waitFor ? C.re(step.after.waitFor) : null;
+    const end = Date.now() + (step.after.timeoutMs || 4000);
+    while (Date.now() < end) {
+      if (added && added.test(D.textOf(document.body, 30000))) return 'added';
+      if (step.waitText) {
+        const f = D.findClickable(document, step.click, { live: true });
+        if (!f.el && f.disabled && C.re(step.waitText).test(D.labelOf(f.disabled))) return 'wait';
+      }
+      await sleep(200);
+    }
+    return 'timeout';
+  }
+
+  async function waitClickable(spec, timeoutMs) {
+    const end = Date.now() + timeoutMs;
+    while (Date.now() < end) {
+      const f = D.findClickable(document, spec, { live: true });
+      if (f.el) return f.el;
+      await sleep(250);
+    }
+    return null;
+  }
+
+  // Waits out a CAPTCHA or queue page without touching it. If it clears without a
+  // navigation (CAPTCHA solved in place), returns so the checkout loop can continue.
+  async function waitOutGate(kind) {
+    if (kind === 'blocked') await needsYou('A CAPTCHA / bot check is showing. Solve it and checkout will continue.');
+    else await event('queue', {});
+    while (D.gate(document, location.href) === kind) await sleep(1000);
+  }
+
+  async function checkout() {
+    role = 'checkout';
+    const store = ctx.store;
+    const cc = ctx.checkout;
+    const clicks = {};
+    let idleSince = Date.now();
+    let lastBeat = 0;
+    let emptySince = 0;
+    await sleep(250);
+
+    for (let iter = 0; iter < 400; iter++) {
+      const url = location.href;
+      if (F.isConfirmation(document, url, store)) return event('confirmed', { url });
+
+      const gate = D.gate(document, url);
+      if (gate) {
+        await waitOutGate(gate);
+        idleSince = Date.now();
+        continue;
+      }
+
+      const steps = F.stepsFor(store, url);
+      // Carts often render "empty" for a moment before items load, so require 4s of it.
+      if (/cart/i.test(url) && steps.some((s) => s.id === 'cart') && F.isEmptyCart(document)) {
+        emptySince = emptySince || Date.now();
+        if (Date.now() - emptySince > 4000) return event('failed', { reason: 'cart is empty (add to cart did not go through)' });
+        await sleep(300);
+        continue;
+      }
+      emptySince = 0;
+      if (!steps.length) {
+        if (Date.now() - idleSince > 15000) return needsYou(`Checkout reached a page I don't recognize: ${url}`);
+        await sleep(500);
+        continue;
+      }
+      const signIn = steps.find((s) => s.needsUser);
+      if (signIn) {
+        await needsYou(signIn.needsUser);
+        await sleep(1000);
+        continue;
+      }
+
+      let step = null;
+      let found = null;
+      for (const s of steps) {
+        if (!s.click) continue;
+        const f = D.findClickable(document, s.click, { live: true });
+        if (f.el || f.disabled) {
+          step = s;
+          found = f;
+          break;
+        }
+      }
+      if (!step) {
+        if (Date.now() - idleSince > 20000) return needsYou(`Stuck on "${steps[0].id}": couldn't find the button`);
+        await sleep(400);
+        continue;
+      }
+
+      if (step.final) return finalStep(step, found);
+
+      if (step.id === 'pdp' && !cc.practice && found.el) {
+        // Re-check right before adding to cart: price, seller and condition can change.
+        const ev = D.evaluate(D.detect(document, store, url, { live: true }), cc);
+        if (!ev.ok) return event('failed', { reason: 'listing no longer passes checks: ' + ev.reasons.join('; ') });
+      }
+
+      if (!found.el) {
+        const label = D.labelOf(found.disabled);
+        const waiting = step.waitText && C.re(step.waitText).test(label);
+        if (step.id === 'pdp' && !waiting && Date.now() - idleSince > 5000) {
+          return event('failed', { reason: `sold out before add to cart (button says "${label || 'disabled'}")` });
+        }
+        if (waiting) {
+          // Best Buy-style "Please Wait" button: it re-enables when it's your turn.
+          // Keep telling the background we're alive so it doesn't call this a stall.
+          if (Date.now() - lastBeat > 10000) {
+            lastBeat = Date.now();
+            await event('step', { step: `${step.id} (waiting: ${label})` });
+          }
+          idleSince = Date.now();
+        } else if (Date.now() - idleSince > 20000) {
+          return needsYou(`"${step.id}" button is disabled (${label || 'no label'})`);
+        }
+        await sleep(300);
+        continue;
+      }
+
+      clicks[step.id] = (clicks[step.id] || 0) + 1;
+      if (clicks[step.id] > 4) return needsYou(`Clicked "${step.id}" 4 times and nothing happened`);
+      await event('step', { step: step.id });
+      click(found.el);
+      idleSince = Date.now();
+
+      if (step.after && step.after.navigate) {
+        if ((await afterClick(step)) === 'wait') continue;
+        location.assign(step.after.navigate === 'cart' ? store.checkout.cartUrl : step.after.navigate);
+        return null;
+      }
+      await sleep(1500);
+    }
+    return needsYou('Checkout timed out on this page');
+  }
+
+  async function finalStep(step, found) {
+    const store = ctx.store;
+    const cc = ctx.checkout;
+    const guard = F.finalGuard(document, store, cc);
+    await event('guard', { subtotal: guard.subtotal, problems: guard.problems });
+    if (!guard.ok) return needsYou('Stopped before Place Order: ' + guard.problems.join('; '));
+
+    const cvvField = D.first(document, step.cvv || []);
+    if (cvvField && !cvvField.value) {
+      const reply = await send({ type: 'cvv' });
+      if (reply && reply.cvv) {
+        setInputValue(cvvField, reply.cvv);
+        await sleep(400);
+      } else if (cc.mode === 'armed' && !cc.practice) {
+        return needsYou('Enter your card security code (CVV), then press Place Order');
+      }
+    }
+
+    const btn = found.el || (await waitClickable(step.click, 8000));
+    if (!btn) return needsYou('Place Order button stayed disabled');
+
+    if (cc.practice || cc.mode !== 'armed') {
+      return event('dry_run_final', { subtotal: guard.subtotal, button: D.labelOf(btn) });
+    }
+
+    const lock = await send({ type: 'checkout', event: 'request_lock', url: location.href });
+    if (!lock || !lock.granted) return event('failed', { reason: 'not placing the order: ' + ((lock && lock.reason) || 'no answer from the extension') });
+
+    const before = D.textOf(document.body, 40000);
+    click(btn);
+    await event('placed_click', { subtotal: guard.subtotal });
+
+    // If the page navigates, the next page's script reports the result.
+    for (let i = 0; i < 60; i++) {
+      await sleep(500);
+      if (F.isConfirmation(document, location.href, store)) return event('confirmed', { url: location.href, subtotal: guard.subtotal });
+      const after = D.textOf(document.body, 40000);
+      if (F.newFailures(before, after)) {
+        const m = after.match(new RegExp('[^.]{0,80}(' + C.MATCH.failure + ')[^.]{0,80}', 'i'));
+        return event('place_failed', { reason: m ? m[0].trim() : 'store showed an error' });
+      }
+    }
+    return event('uncertain', { subtotal: guard.subtotal });
+  }
+})();

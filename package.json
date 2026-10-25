@@ -1,0 +1,14 @@
+{
+  "name": "ps5-pro-restock-buyer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Chrome extension that watches stores for a new PS5 Pro at list price and checks out automatically.",
+  "scripts": {
+    "test": "node --test test/unit/*.test.js",
+    "test:e2e": "node --test --test-concurrency=1 test/e2e/*.test.js",
+    "icons": "node tools/make-icons.js"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
+  }
+}
